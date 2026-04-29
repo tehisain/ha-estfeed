@@ -160,6 +160,8 @@ Both return `dataclass` types defined in this module so callers don't depend on 
 
 **Rate limiter:** per-client `asyncio.Lock` + monotonic `last_request_at`; before each request, sleep `max(0, 5.0 - (now - last))`. Per-instance scope means two config entries (two API keys) make calls in parallel without interfering — Estfeed's rate limit is per key.
 
+**Recent-request ring buffer:** the client keeps the last 5 request summaries (`{path, status, duration_ms, at}`, no payloads or tokens) in memory for the diagnostics endpoint to surface. Cleared on unload.
+
 **Typed exceptions:**
 
 | Exception                | Source                                  | Coordinator handling                                       |
@@ -209,7 +211,7 @@ metadata = {
 }
 ```
 
-`StatisticData` rows: `{ start: hour-aligned UTC datetime, state: interval kWh (display only), sum: cumulative kWh from series start }`.
+`StatisticData` rows: `{ start: hour-aligned UTC datetime, state: cumulative kWh at end of interval, sum: cumulative kWh from series start }`. For metering counters, `state == sum` for every row — both express the running total. HA derives the per-interval delta (the value actually charted in the Energy Dashboard) from consecutive `sum` differences.
 
 **Initial backfill:** `async_setup_entry` checks whether any statistics exist for this entry's streams via `get_last_statistics`. If none, it schedules `hass.async_create_background_task(_initial_backfill(...))` which runs the same fetch loop with `start = now - options.backfill_months`. Estimated ~12 chunks × 5 s ≈ 60 s for one meter at 12 months. The user-visible setup completes in <1 s; data fills in behind the scenes.
 
@@ -245,7 +247,9 @@ Implementation re-runs the chunked fetch for the requested window. Idempotent �
 | `sensor.<slug>_production_month_to_date` | Production month-to-date     | kWh  | energy       | (none)      | False              |
 | `sensor.<slug>_production_previous_month`| Production previous month    | kWh  | energy       | (none)      | False              |
 
-`state_class` intentionally omitted — these are derived totals, and long-term statistics already come from `async_add_external_statistics`. Production sensors disabled by default (this user has none); one click in the entity registry enables them.
+`state_class` intentionally omitted — these are derived totals, and long-term statistics already come from `async_add_external_statistics`. Production sensors are disabled by default for every install (most Estonian households don't generate); one click in the entity registry enables them when relevant.
+
+**Availability.** Lagging sensors and the `latest_interval` diagnostic are `available` whenever the rolling cache contains at least one interval, regardless of the most recent coordinator tick succeeding. This avoids flapping to `unavailable` on a single transient API hiccup; "is data flowing?" is answered by `binary_sensor.<slug>_data_fresh` (intentional separation of "the sensor has a value" from "the value is recent enough"). When the cache is empty (post-restart, before warmup completes), entities report `unavailable`.
 
 **Computation** (all in `hass.config.time_zone`, default `Europe/Tallinn`):
 - *Yesterday*: sum of intervals with `local_date(periodStart) == today_local - 1d`.
@@ -314,7 +318,7 @@ Tokens, secrets, and full request/response bodies are never logged at any level.
 | Bad credentials at setup                | Keycloak 401 / `invalid_client`        | Form error: "Invalid client_id / client_secret".                            |
 | Credentials revoked after setup         | Keycloak 401 mid-poll                  | `ConfigEntryAuthFailed` → HA reauth UI; entities and statistics preserved.  |
 | Rate limit (429)                        | Response status                        | Sleep `Retry-After` (or 5 s), retry once. Else fail this tick.              |
-| Network timeout / DNS / 5xx             | `aiohttp.ClientError`, `TimeoutError`  | Fail tick. After 3 consecutive failures, sensors → `unavailable`.           |
+| Network timeout / DNS / 5xx             | `aiohttp.ClientError`, `TimeoutError`  | Fail tick (log WARNING). Sensors keep last cached value; `binary_sensor.data_fresh` flips to `off` once the newest interval ages past 30 h. |
 | Per-meter `error` in 200 response       | `ApiKeyMeterDataDto.error` populated   | Skip that meter for this cycle; continue with healthy meters; log WARNING.  |
 | Gaps in returned intervals              | Fewer rows than expected               | Write what we got. Backfill service can refetch.                            |
 
