@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TypedDict
+
+from homeassistant.components.recorder.statistics import async_add_external_statistics
+from homeassistant.core import HomeAssistant
 
 from .api import AccountingInterval
 from .const import DOMAIN, Kind
@@ -63,3 +67,36 @@ def compute_statistic_rows(
         running += float(value)
         rows.append({"start": ival.period_start, "state": running, "sum": running})
     return rows
+
+
+@dataclass(frozen=True, slots=True)
+class StatisticStream:
+    """Identifies one external statistics stream (one statistic_id)."""
+
+    statistic_id: str
+    name: str
+    unit: str
+    kind: Kind
+
+
+async def async_write_meter_statistics(
+    hass: HomeAssistant,
+    stream: StatisticStream,
+    intervals: list[AccountingInterval],
+    prior_sum: float,
+) -> None:
+    """Compute and submit external statistics rows for one meter+kind."""
+    rows = compute_statistic_rows(intervals, stream.kind, prior_sum=prior_sum)
+    if not rows:
+        return
+    metadata = {
+        "source": DOMAIN,
+        "statistic_id": stream.statistic_id,
+        "name": stream.name,
+        "unit_of_measurement": stream.unit,
+        "has_sum": True,
+        "has_mean": False,
+    }
+    # async_add_external_statistics is a synchronous @callback in this HA version
+    # (inspect.iscoroutinefunction returned False); no await needed.
+    async_add_external_statistics(hass, metadata, rows)

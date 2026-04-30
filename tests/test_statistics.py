@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from unittest.mock import Mock, patch
+
+import pytest
 
 from custom_components.estfeed.api import AccountingInterval
 from custom_components.estfeed.const import Kind
 from custom_components.estfeed.statistics import (
+    StatisticStream,
+    async_write_meter_statistics,
     build_statistic_id,
     compute_statistic_rows,
     eic_suffix,
@@ -112,3 +117,62 @@ def test_compute_statistic_rows_sorts_by_start():
     assert starts == sorted(starts)
     sums = [r["sum"] for r in rows]
     assert sums == [1.0, 3.0, 3.5]
+
+
+@pytest.mark.asyncio
+async def test_async_write_meter_statistics_calls_external_stats(hass):
+    intervals = [
+        AccountingInterval(
+            period_start=datetime(2026, 4, 27, 0, tzinfo=UTC),
+            consumption_kwh=1.0,
+            production_kwh=None,
+            consumption_m3=None,
+            production_m3=None,
+        )
+    ]
+    stream = StatisticStream(
+        statistic_id="estfeed:home_consumption_089N",
+        name="Home consumption (38ZEE-00720089-N)",
+        unit="kWh",
+        kind=Kind.CONSUMPTION,
+    )
+    with patch(
+        "custom_components.estfeed.statistics.async_add_external_statistics",
+        new=Mock(),
+    ) as mock_add:
+        await async_write_meter_statistics(hass, stream, intervals, prior_sum=0.0)
+
+    mock_add.assert_called_once()
+    metadata, rows = mock_add.call_args.args[1], mock_add.call_args.args[2]
+    assert metadata["statistic_id"] == "estfeed:home_consumption_089N"
+    assert metadata["source"] == "estfeed"
+    assert metadata["unit_of_measurement"] == "kWh"
+    assert metadata["has_sum"] is True
+    assert metadata["has_mean"] is False
+    assert len(rows) == 1
+    assert rows[0]["sum"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_async_write_meter_statistics_noop_when_no_rows(hass):
+    intervals = [
+        AccountingInterval(
+            period_start=datetime(2026, 4, 27, 0, tzinfo=UTC),
+            consumption_kwh=None,
+            production_kwh=None,
+            consumption_m3=None,
+            production_m3=None,
+        )
+    ]
+    stream = StatisticStream(
+        statistic_id="estfeed:home_consumption_089N",
+        name="x",
+        unit="kWh",
+        kind=Kind.CONSUMPTION,
+    )
+    with patch(
+        "custom_components.estfeed.statistics.async_add_external_statistics",
+        new=Mock(),
+    ) as mock_add:
+        await async_write_meter_statistics(hass, stream, intervals, prior_sum=0.0)
+    mock_add.assert_not_called()
