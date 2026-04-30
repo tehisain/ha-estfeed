@@ -1,0 +1,13 @@
+{
+  "domain": "estfeed",
+  "name": "Estfeed",
+  "version": "0.1.0",
+  "config_flow": true,
+  "documentation": "https://github.com/maidokaara/ha-estfeed",
+  "issue_tracker": "https://github.com/maidokaara/ha-estfeed/issues",
+  "codeowners": ["@maidokaara"],
+  "iot_class": "cloud_polling",
+  "integration_type": "hub",
+  "requirements": [],
+  "dependencies": ["recorder"]
+}
