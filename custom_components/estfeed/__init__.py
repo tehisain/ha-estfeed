@@ -1,0 +1,1 @@
+"""Estfeed Home Assistant integration."""
