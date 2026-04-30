@@ -190,6 +190,27 @@ class EstfeedClient:
             finally:
                 self._last_request_at = time.monotonic()
 
+    async def _request_json(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        try:
+            status, payload = await self._request(method, path, params=params)
+        except TimeoutError as err:
+            raise EstfeedTimeoutError(str(err)) from err
+        except aiohttp.ClientError as err:
+            raise EstfeedTimeoutError(str(err)) from err
+
+        if status == 200:
+            return payload
+        if status in (401, 403):
+            raise EstfeedAuthError(f"{status}: {payload}")
+        if status == 429:
+            raise EstfeedRateLimitError(f"{status}: {payload}")
+        raise EstfeedAPIError(f"{status}: {payload}")
+
     async def _fetch_token(self, now_monotonic: float) -> tuple[str, float]:
         data = {
             "grant_type": "client_credentials",
@@ -209,5 +230,21 @@ class EstfeedClient:
             return payload["access_token"], now_monotonic + float(payload.get("expires_in", 60))
 
 
-class EstfeedAuthError(Exception):
-    """Authentication / authorisation failure."""
+class EstfeedError(Exception):
+    """Base error for the Estfeed integration."""
+
+
+class EstfeedAuthError(EstfeedError):
+    """Authentication / authorisation failure (401, 403, Keycloak failure)."""
+
+
+class EstfeedRateLimitError(EstfeedError):
+    """API returned 429 Too Many Requests."""
+
+
+class EstfeedAPIError(EstfeedError):
+    """Generic API failure (4xx other than 401/403/429, or 5xx)."""
+
+
+class EstfeedTimeoutError(EstfeedError):
+    """Network timeout or connection error."""

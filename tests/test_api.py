@@ -12,7 +12,11 @@ from aioresponses import aioresponses
 from freezegun import freeze_time
 
 from custom_components.estfeed.api import (
+    EstfeedAPIError,
+    EstfeedAuthError,
     EstfeedClient,
+    EstfeedRateLimitError,
+    EstfeedTimeoutError,
     MeterData,
     MeteringPoint,
     Period,
@@ -203,3 +207,54 @@ async def test_recent_requests_ring_buffer(client, monkeypatch):
     assert len(summaries) == 5
     assert all(s["status"] == 200 for s in summaries)
     assert all(s["path"] == "/api/public/v1/x" for s in summaries)
+
+
+async def test_401_raises_auth_error(client):
+    with aioresponses() as mocked:
+        mocked.post(
+            KEYCLOAK_TOKEN_URL,
+            payload={"access_token": "t", "expires_in": 300, "token_type": "Bearer"},
+        )
+        mocked.get(
+            "https://estfeed.elering.ee/api/public/v1/x",
+            status=401,
+            payload={"message": "nope"},
+        )
+        with pytest.raises(EstfeedAuthError):
+            await client._request_json("GET", "/api/public/v1/x")
+
+
+async def test_429_raises_rate_limit(client):
+    with aioresponses() as mocked:
+        mocked.post(
+            KEYCLOAK_TOKEN_URL,
+            payload={"access_token": "t", "expires_in": 300, "token_type": "Bearer"},
+        )
+        mocked.get("https://estfeed.elering.ee/api/public/v1/x", status=429, payload={})
+        with pytest.raises(EstfeedRateLimitError):
+            await client._request_json("GET", "/api/public/v1/x")
+
+
+async def test_500_raises_api_error(client):
+    with aioresponses() as mocked:
+        mocked.post(
+            KEYCLOAK_TOKEN_URL,
+            payload={"access_token": "t", "expires_in": 300, "token_type": "Bearer"},
+        )
+        mocked.get("https://estfeed.elering.ee/api/public/v1/x", status=500, payload={})
+        with pytest.raises(EstfeedAPIError):
+            await client._request_json("GET", "/api/public/v1/x")
+
+
+async def test_timeout_raises_timeout_error(client):
+    with aioresponses() as mocked:
+        mocked.post(
+            KEYCLOAK_TOKEN_URL,
+            payload={"access_token": "t", "expires_in": 300, "token_type": "Bearer"},
+        )
+        mocked.get(
+            "https://estfeed.elering.ee/api/public/v1/x",
+            exception=TimeoutError(),
+        )
+        with pytest.raises(EstfeedTimeoutError):
+            await client._request_json("GET", "/api/public/v1/x")
