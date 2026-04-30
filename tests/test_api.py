@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
+import aiohttp
+import pytest
+from aioresponses import aioresponses
+from freezegun import freeze_time
+
 from custom_components.estfeed.api import (
+    EstfeedClient,
     MeterData,
     MeteringPoint,
     Period,
 )
-from custom_components.estfeed.const import CommodityType
+from custom_components.estfeed.const import KEYCLOAK_TOKEN_URL, CommodityType
 
 
 def test_metering_point_from_dict():
@@ -66,3 +73,61 @@ def test_meter_data_with_per_meter_error():
     md = MeterData.from_dict(raw)
     assert md.error is not None
     assert md.error.code == "error.boom"
+
+
+@pytest.fixture
+async def session():
+    connector = aiohttp.TCPConnector(force_close=True)
+    async with aiohttp.ClientSession(connector=connector) as s:
+        yield s
+
+
+@pytest.fixture
+def client(session):
+    return EstfeedClient(session, client_id="cid", client_secret="csec")
+
+
+async def test_token_fetched_and_cached(client):
+    with aioresponses() as mocked:
+        mocked.post(
+            KEYCLOAK_TOKEN_URL,
+            payload={"access_token": "tok-1", "expires_in": 300, "token_type": "Bearer"},
+        )
+        token1 = await client._ensure_token()
+        token2 = await client._ensure_token()
+        assert token1 == "tok-1"
+        assert token2 == "tok-1"  # cached, no second POST
+        # aioresponses raises if a mocked URL is requested more times than registered
+        # (it's registered once); reaching this line proves the second call did not POST.
+
+
+async def test_token_refresh_before_expiry(client):
+    """Token must be refreshed when within the safety margin of expiry."""
+    with aioresponses() as mocked:
+        mocked.post(
+            KEYCLOAK_TOKEN_URL,
+            payload={"access_token": "tok-1", "expires_in": 300, "token_type": "Bearer"},
+        )
+        with freeze_time("2026-04-29T00:00:00Z") as frozen:
+            await client._ensure_token()
+            # advance to within 30s of expiry: 300 - 30 = 270s in
+            frozen.tick(delta=271)
+            mocked.post(
+                KEYCLOAK_TOKEN_URL,
+                payload={"access_token": "tok-2", "expires_in": 300, "token_type": "Bearer"},
+            )
+            token = await client._ensure_token()
+            assert token == "tok-2"
+
+
+async def test_concurrent_token_fetch_serialised(client):
+    """Ten concurrent _ensure_token calls trigger only one HTTP POST."""
+    with aioresponses() as mocked:
+        mocked.post(
+            KEYCLOAK_TOKEN_URL,
+            payload={"access_token": "tok-1", "expires_in": 300, "token_type": "Bearer"},
+        )
+        results = await asyncio.gather(*[client._ensure_token() for _ in range(10)])
+        assert all(r == "tok-1" for r in results)
+        # Only one mock was registered — if more than one POST happened, aioresponses
+        # would raise on the unmatched extras.
