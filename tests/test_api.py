@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time as time_module
 from datetime import UTC, datetime
 
 import aiohttp
@@ -131,3 +132,74 @@ async def test_concurrent_token_fetch_serialised(client):
         assert all(r == "tok-1" for r in results)
         # Only one mock was registered — if more than one POST happened, aioresponses
         # would raise on the unmatched extras.
+
+
+async def test_rate_limit_no_sleep_when_no_prior_request(client, monkeypatch):
+    """Fresh client (no prior request) makes the call immediately."""
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    with aioresponses() as mocked:
+        mocked.post(
+            KEYCLOAK_TOKEN_URL,
+            payload={"access_token": "t", "expires_in": 300, "token_type": "Bearer"},
+        )
+        mocked.get("https://estfeed.elering.ee/api/public/v1/x", payload={"ok": True})
+        await client._request("GET", "/api/public/v1/x")
+
+    # _last_request_at starts at 0; elapsed since epoch is huge → no positive sleep needed.
+    assert all(s <= 0 for s in sleeps)
+
+
+async def test_rate_limit_sleeps_when_too_soon(client, monkeypatch):
+    """A request made right after a prior one must sleep until ≥5s elapsed."""
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    # Pretend a request just happened a moment ago.
+    client._last_request_at = time_module.monotonic()
+
+    with aioresponses() as mocked:
+        mocked.post(
+            KEYCLOAK_TOKEN_URL,
+            payload={"access_token": "t", "expires_in": 300, "token_type": "Bearer"},
+        )
+        mocked.get("https://estfeed.elering.ee/api/public/v1/x", payload={"ok": True})
+        await client._request("GET", "/api/public/v1/x")
+
+    # Expect a sleep close to 5s (minus the few ms of test overhead since we set _last_request_at).
+    assert any(s >= 4.0 for s in sleeps), f"expected a ~5s sleep, got {sleeps}"
+
+
+async def test_recent_requests_ring_buffer(client, monkeypatch):
+    """The ring buffer keeps the most recent N=5 request summaries."""
+
+    # Patch sleep so the test runs fast despite the 5s rate limit.
+    async def fake_sleep(_):
+        return
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    with aioresponses() as mocked:
+        mocked.post(
+            KEYCLOAK_TOKEN_URL,
+            payload={"access_token": "t", "expires_in": 300, "token_type": "Bearer"},
+        )
+        for _ in range(7):
+            mocked.get("https://estfeed.elering.ee/api/public/v1/x", payload={"ok": True})
+
+        for _ in range(7):
+            await client._request("GET", "/api/public/v1/x")
+
+    summaries = list(client.recent_requests)
+    assert len(summaries) == 5
+    assert all(s["status"] == 200 for s in summaries)
+    assert all(s["path"] == "/api/public/v1/x" for s in summaries)

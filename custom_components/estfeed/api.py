@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Self
@@ -12,7 +13,10 @@ from typing import Any, Self
 import aiohttp
 
 from .const import (
+    API_BASE_URL,
     KEYCLOAK_TOKEN_URL,
+    RATE_LIMIT_SECONDS,
+    RECENT_REQUESTS_BUFFER_SIZE,
     REQUEST_TIMEOUT_SECONDS,
     TOKEN_REFRESH_MARGIN_SECONDS,
     CommodityType,
@@ -136,6 +140,9 @@ class EstfeedClient:
         self._token: str | None = None
         self._token_expires_at: float = 0.0  # monotonic
         self._token_lock = asyncio.Lock()
+        self._rate_lock = asyncio.Lock()
+        self._last_request_at: float = 0.0
+        self.recent_requests: deque[dict[str, Any]] = deque(maxlen=RECENT_REQUESTS_BUFFER_SIZE)
 
     async def _ensure_token(self) -> str:
         """Return a valid bearer token, fetching/refreshing as needed."""
@@ -145,6 +152,43 @@ class EstfeedClient:
                 return self._token
             self._token, self._token_expires_at = await self._fetch_token(now)
             return self._token
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        token = await self._ensure_token()
+        async with self._rate_lock:
+            now = time.monotonic()
+            elapsed = now - self._last_request_at
+            wait = RATE_LIMIT_SECONDS - elapsed
+            if wait > 0:
+                await asyncio.sleep(wait)
+            url = f"{API_BASE_URL}{path}"
+            started = time.monotonic()
+            try:
+                async with self._session.request(
+                    method,
+                    url,
+                    params=params,
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS),
+                ) as resp:
+                    duration_ms = int((time.monotonic() - started) * 1000)
+                    self.recent_requests.append(
+                        {
+                            "method": method,
+                            "path": path,
+                            "status": resp.status,
+                            "duration_ms": duration_ms,
+                        }
+                    )
+                    payload = await resp.json()
+                    return resp.status, payload
+            finally:
+                self._last_request_at = time.monotonic()
 
     async def _fetch_token(self, now_monotonic: float) -> tuple[str, float]:
         data = {
