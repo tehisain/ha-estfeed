@@ -21,7 +21,7 @@ from custom_components.estfeed.api import (
     MeteringPoint,
     Period,
 )
-from custom_components.estfeed.const import KEYCLOAK_TOKEN_URL, CommodityType
+from custom_components.estfeed.const import KEYCLOAK_TOKEN_URL, CommodityType, Resolution
 
 
 def test_metering_point_from_dict():
@@ -258,3 +258,73 @@ async def test_timeout_raises_timeout_error(client):
         )
         with pytest.raises(EstfeedTimeoutError):
             await client._request_json("GET", "/api/public/v1/x")
+
+
+async def test_list_metering_points(client):
+    with aioresponses() as mocked:
+        mocked.post(
+            KEYCLOAK_TOKEN_URL,
+            payload={"access_token": "t", "expires_in": 300, "token_type": "Bearer"},
+        )
+        mocked.get(
+            "https://estfeed.elering.ee/api/public/v1/metering-point-eics"
+            "?startDateTime=2026-04-01T00:00:00Z&endDateTime=2026-04-29T00:00:00Z",
+            payload=[
+                {
+                    "eic": "38ZEE-00720089-N",
+                    "commodityType": "ELECTRICITY",
+                    "periods": [{"from": "2019-07-27T21:00:00Z"}],
+                }
+            ],
+        )
+        result = await client.list_metering_points(
+            datetime(2026, 4, 1, tzinfo=UTC),
+            datetime(2026, 4, 29, tzinfo=UTC),
+        )
+        assert len(result) == 1
+        assert result[0].eic == "38ZEE-00720089-N"
+
+
+async def test_get_metering_data_with_eics(client):
+    with aioresponses() as mocked:
+        mocked.post(
+            KEYCLOAK_TOKEN_URL,
+            payload={"access_token": "t", "expires_in": 300, "token_type": "Bearer"},
+        )
+        mocked.get(
+            "https://estfeed.elering.ee/api/public/v1/metering-data"
+            "?startDateTime=2026-04-27T00:00:00Z&endDateTime=2026-04-28T00:00:00Z"
+            "&resolution=one_hour&meteringPointEics=38ZEE-00720089-N",
+            payload=[
+                {
+                    "meteringPointEic": "38ZEE-00720089-N",
+                    "accountingIntervals": [
+                        {
+                            "periodStart": "2026-04-27T00:00:00Z",
+                            "consumptionKwh": 0.348,
+                            "productionKwh": 0.0,
+                        },
+                    ],
+                }
+            ],
+        )
+        result = await client.get_metering_data(
+            datetime(2026, 4, 27, tzinfo=UTC),
+            datetime(2026, 4, 28, tzinfo=UTC),
+            Resolution.HOUR,
+            eics=["38ZEE-00720089-N"],
+        )
+        assert len(result) == 1
+        assert result[0].eic == "38ZEE-00720089-N"
+        assert len(result[0].intervals) == 1
+        assert result[0].intervals[0].consumption_kwh == 0.348
+
+
+async def test_get_metering_data_too_many_eics_raises(client):
+    with pytest.raises(ValueError, match="up to 10"):
+        await client.get_metering_data(
+            datetime(2026, 4, 1, tzinfo=UTC),
+            datetime(2026, 4, 2, tzinfo=UTC),
+            Resolution.HOUR,
+            eics=[f"X{i}" for i in range(11)],
+        )

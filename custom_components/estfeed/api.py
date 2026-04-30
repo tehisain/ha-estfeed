@@ -6,8 +6,9 @@ import asyncio
 import logging
 import time
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Self
 
 import aiohttp
@@ -15,11 +16,13 @@ import aiohttp
 from .const import (
     API_BASE_URL,
     KEYCLOAK_TOKEN_URL,
+    MAX_EICS_PER_REQUEST,
     RATE_LIMIT_SECONDS,
     RECENT_REQUESTS_BUFFER_SIZE,
     REQUEST_TIMEOUT_SECONDS,
     TOKEN_REFRESH_MARGIN_SECONDS,
     CommodityType,
+    Resolution,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -210,6 +213,40 @@ class EstfeedClient:
         if status == 429:
             raise EstfeedRateLimitError(f"{status}: {payload}")
         raise EstfeedAPIError(f"{status}: {payload}")
+
+    async def list_metering_points(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> list[MeteringPoint]:
+        params = {
+            "startDateTime": start.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "endDateTime": end.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        }
+        payload = await self._request_json(
+            "GET", "/api/public/v1/metering-point-eics", params=params
+        )
+        return [MeteringPoint.from_dict(item) for item in payload]
+
+    async def get_metering_data(
+        self,
+        start: datetime,
+        end: datetime,
+        resolution: Resolution,
+        eics: Iterable[str] | None = None,
+    ) -> list[MeterData]:
+        eic_list = list(eics) if eics is not None else None
+        if eic_list is not None and len(eic_list) > MAX_EICS_PER_REQUEST:
+            raise ValueError(f"API supports up to 10 EICs per request, got {len(eic_list)}")
+        params: dict[str, Any] = {
+            "startDateTime": start.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "endDateTime": end.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "resolution": resolution.value,
+        }
+        if eic_list:
+            params["meteringPointEics"] = ",".join(eic_list)
+        payload = await self._request_json("GET", "/api/public/v1/metering-data", params=params)
+        return [MeterData.from_dict(item) for item in payload]
 
     async def _fetch_token(self, now_monotonic: float) -> tuple[str, float]:
         data = {
