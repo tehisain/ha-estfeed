@@ -131,6 +131,14 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         # consumption and production together. Use the latest-seen across kinds
         # so we don't re-fetch already-recorded data.
         chunk_start = start if force_start else await self._chunk_start_for_meter(streams, start)
+        # Read prior_sum ONCE before the chunk loop (per stream) and advance
+        # locally as we write. HA's recorder may not flush statistics writes
+        # synchronously, so re-reading get_last_statistics inside the loop
+        # would risk seeing stale data for chunk N+1 after chunk N's write.
+        prior_sums: dict[str, float] = {}
+        if write_stats:
+            for stream in streams:
+                prior_sums[stream.statistic_id] = await self._prior_sum_for_stream(stream)
         cursor = chunk_start
         while cursor < end:
             chunk_end = min(cursor + timedelta(days=MAX_DAYS_PER_REQUEST), end)
@@ -147,11 +155,16 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
                         md.error.trace_id,
                     )
                     continue
+                # Successful response for this meter — clear any stale error
+                # state so consumers see the meter as healthy again (M8).
+                self.last_meter_errors.pop(md.eic, None)
                 for stream in streams:
                     if write_stats:
-                        prior_sum = await self._prior_sum_for_stream(stream)
-                        await async_write_meter_statistics(
-                            self.hass, stream, md.intervals, prior_sum=prior_sum
+                        prior_sums[stream.statistic_id] = await async_write_meter_statistics(
+                            self.hass,
+                            stream,
+                            md.intervals,
+                            prior_sum=prior_sums[stream.statistic_id],
                         )
                     self._update_cache(meter.eic, stream.kind, md.intervals)
             cursor = chunk_end
@@ -171,6 +184,7 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
                 latest_per_stream.append(seen)
         if not latest_per_stream:
             return default_start
+        # TODO: revisit if partial-kind failures observed — switch to min() with overlap window.
         return max(latest_per_stream) + timedelta(hours=1)
 
     async def _latest_seen_for_stream(self, stream: StatisticStream) -> datetime | None:

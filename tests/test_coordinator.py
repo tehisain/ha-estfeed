@@ -158,3 +158,105 @@ async def test_coordinator_per_meter_error_is_skipped(hass):
         await coordinator._async_update_data()
 
     mock_write.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_clears_stale_error_on_success(hass):
+    """A successful MeterData should clear any prior error code for that EIC (M8)."""
+    client = MagicMock()
+    client.list_metering_points = AsyncMock(return_value=[_make_meter()])
+    client.get_metering_data = AsyncMock(
+        return_value=[
+            MeterData(
+                eic="38ZEE-00720089-N",
+                intervals=_hourly(datetime(2026, 4, 28, 0, tzinfo=UTC), 3),
+            )
+        ]
+    )
+
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={CONF_RESOLUTION: Resolution.HOUR.value, CONF_BACKFILL_MONTHS: 12},
+    )
+    coordinator.meters = [_make_meter()]
+    # Pre-populate stale error state from a prior failed tick.
+    coordinator.last_meter_errors["38ZEE-00720089-N"] = "OLD_CODE"
+
+    with (
+        patch(
+            "custom_components.estfeed.coordinator.get_last_statistics",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.async_write_meter_statistics",
+            new=AsyncMock(return_value=0.0),
+        ),
+    ):
+        await coordinator._async_update_data()
+
+    assert "38ZEE-00720089-N" not in coordinator.last_meter_errors
+
+
+@pytest.mark.asyncio
+async def test_coordinator_carries_prior_sum_across_chunks(hass):
+    """prior_sum must be tracked locally across chunks within a single fetch.
+
+    Re-reading get_last_statistics per chunk would race with HA's recorder
+    flush. The coordinator should read prior_sum once and advance it from the
+    return value of async_write_meter_statistics.
+    """
+    meter = _make_meter()
+    client = MagicMock()
+    client.list_metering_points = AsyncMock(return_value=[meter])
+    # Two chunks of 31 days each → triggers the multi-chunk loop.
+    client.get_metering_data = AsyncMock(
+        return_value=[
+            MeterData(
+                eic="38ZEE-00720089-N",
+                intervals=_hourly(datetime(2026, 1, 1, 0, tzinfo=UTC), 24),
+            )
+        ]
+    )
+
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={CONF_RESOLUTION: Resolution.HOUR.value, CONF_BACKFILL_MONTHS: 12},
+    )
+    coordinator.meters = [meter]
+
+    # Force a multi-chunk window: 70 days back → ~3 chunks of 31 days.
+    start = datetime(2026, 1, 1, 0, tzinfo=UTC)
+    end = datetime(2026, 3, 12, 0, tzinfo=UTC)
+    # async_write_meter_statistics returns running sum; simulate +12.0 per call.
+    write_returns = [12.0, 24.0, 36.0]
+    write_mock = AsyncMock(side_effect=write_returns * 4)  # plenty for both kinds
+    prior_mock = AsyncMock(return_value=5.0)
+
+    with (
+        patch(
+            "custom_components.estfeed.coordinator.get_last_statistics",
+            new=AsyncMock(return_value={}),
+        ),
+        patch.object(coordinator, "_prior_sum_for_stream", new=prior_mock),
+        patch(
+            "custom_components.estfeed.coordinator.async_write_meter_statistics",
+            new=write_mock,
+        ),
+    ):
+        await coordinator._fetch_window(start, end, write_stats=True, force_start=True)
+
+    # _prior_sum_for_stream must be called exactly once per stream (2 streams),
+    # NOT once per chunk. Three chunks would otherwise multiply this.
+    assert prior_mock.call_count == 2
+    # First write per stream uses prior_sum=5.0 (the read-once value).
+    first_calls = write_mock.call_args_list[:2]
+    for call in first_calls:
+        assert call.kwargs["prior_sum"] == 5.0
+    # Subsequent writes for the same stream should chain off the returned value
+    # (12.0), not re-fetch from get_last_statistics.
+    third_call = write_mock.call_args_list[2]
+    assert third_call.kwargs["prior_sum"] == 12.0

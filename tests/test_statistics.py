@@ -140,7 +140,7 @@ async def test_async_write_meter_statistics_calls_external_stats(hass):
         "custom_components.estfeed.statistics.async_add_external_statistics",
         new=Mock(),
     ) as mock_add:
-        await async_write_meter_statistics(hass, stream, intervals, prior_sum=0.0)
+        result = await async_write_meter_statistics(hass, stream, intervals, prior_sum=0.0)
 
     mock_add.assert_called_once()
     metadata, rows = mock_add.call_args.args[1], mock_add.call_args.args[2]
@@ -151,6 +151,8 @@ async def test_async_write_meter_statistics_calls_external_stats(hass):
     assert metadata["has_mean"] is False
     assert len(rows) == 1
     assert rows[0]["sum"] == 1.0
+    # Returns final running sum so multi-chunk callers can chain prior_sum.
+    assert result == 1.0
 
 
 @pytest.mark.asyncio
@@ -174,5 +176,7 @@ async def test_async_write_meter_statistics_noop_when_no_rows(hass):
         "custom_components.estfeed.statistics.async_add_external_statistics",
         new=Mock(),
     ) as mock_add:
-        await async_write_meter_statistics(hass, stream, intervals, prior_sum=0.0)
+        result = await async_write_meter_statistics(hass, stream, intervals, prior_sum=42.0)
     mock_add.assert_not_called()
+    # No rows produced → return prior_sum unchanged for the chunk loop to chain.
+    assert result == 42.0

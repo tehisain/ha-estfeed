@@ -84,11 +84,18 @@ async def async_write_meter_statistics(
     stream: StatisticStream,
     intervals: list[AccountingInterval],
     prior_sum: float,
-) -> None:
-    """Compute and submit external statistics rows for one meter+kind."""
+) -> float:
+    """Compute and submit external statistics rows for one meter+kind.
+
+    Returns the running cumulative sum after processing these intervals: equal
+    to ``prior_sum`` when no rows are produced, otherwise the ``sum`` of the
+    last (latest) row. Callers fetching multiple chunks should pass this back
+    in as ``prior_sum`` for the next chunk to avoid a read-after-write hazard
+    against HA's recorder (which may not flush statistics writes synchronously).
+    """
     rows = compute_statistic_rows(intervals, stream.kind, prior_sum=prior_sum)
     if not rows:
-        return
+        return prior_sum
     metadata = {
         "source": DOMAIN,
         "statistic_id": stream.statistic_id,
@@ -100,3 +107,4 @@ async def async_write_meter_statistics(
     # async_add_external_statistics is a synchronous @callback in this HA version
     # (inspect.iscoroutinefunction returned False); no await needed.
     async_add_external_statistics(hass, metadata, rows)
+    return float(rows[-1]["sum"])
