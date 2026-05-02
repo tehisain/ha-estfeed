@@ -17,6 +17,7 @@ from custom_components.estfeed.const import (
     CONF_BACKFILL_MONTHS,
     CONF_RESOLUTION,
     CommodityType,
+    Kind,
     Resolution,
 )
 from custom_components.estfeed.coordinator import EstfeedCoordinator
@@ -260,3 +261,73 @@ async def test_coordinator_carries_prior_sum_across_chunks(hass):
     # (12.0), not re-fetch from get_last_statistics.
     third_call = write_mock.call_args_list[2]
     assert third_call.kwargs["prior_sum"] == 12.0
+
+
+@pytest.mark.asyncio
+async def test_initial_backfill_uses_backfill_months(hass):
+    client = MagicMock()
+    client.list_metering_points = AsyncMock(return_value=[_make_meter()])
+    client.get_metering_data = AsyncMock(
+        return_value=[MeterData(eic="38ZEE-00720089-N", intervals=[])]
+    )
+
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={CONF_RESOLUTION: Resolution.HOUR.value, CONF_BACKFILL_MONTHS: 12},
+    )
+    coordinator.meters = [_make_meter()]
+
+    with (
+        patch(
+            "custom_components.estfeed.coordinator.get_last_statistics",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.async_write_meter_statistics",
+            new=AsyncMock(),
+        ),
+    ):
+        await coordinator.async_initial_backfill()
+
+    # First fetch starts ~12 months back. Allow some tolerance.
+    args = client.get_metering_data.call_args_list[0].args
+    assert args[0] < datetime.now(tz=UTC) - timedelta(days=350)
+
+
+@pytest.mark.asyncio
+async def test_cache_warmup_populates_rolling_cache(hass):
+    intervals = _hourly(datetime.now(tz=UTC) - timedelta(days=30), 24 * 5)
+    client = MagicMock()
+    client.list_metering_points = AsyncMock(return_value=[_make_meter()])
+    client.get_metering_data = AsyncMock(
+        return_value=[MeterData(eic="38ZEE-00720089-N", intervals=intervals)]
+    )
+
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={CONF_RESOLUTION: Resolution.HOUR.value, CONF_BACKFILL_MONTHS: 12},
+    )
+    coordinator.meters = [_make_meter()]
+
+    with (
+        patch(
+            "custom_components.estfeed.coordinator.get_last_statistics",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.async_write_meter_statistics",
+            new=AsyncMock(),
+        ),
+    ):
+        await coordinator.async_warm_cache()
+
+    cached = coordinator.cache[("38ZEE-00720089-N", Kind.CONSUMPTION)]
+    # The mock returns the same intervals for every chunk; the warmup window is split
+    # into 31-day chunks so the cache gets called multiple times. We don't assert an
+    # exact count — only that the cache was populated for both kinds.
+    assert len(cached) > 0
+    assert len(coordinator.cache[("38ZEE-00720089-N", Kind.PRODUCTION)]) > 0

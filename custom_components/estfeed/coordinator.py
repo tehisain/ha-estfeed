@@ -103,6 +103,29 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         except EstfeedError as err:
             raise UpdateFailed(str(err)) from err
 
+    async def async_initial_backfill(self) -> None:
+        """Run once at setup if no statistics exist for this entry's streams.
+
+        Walks 12 months of history (or whatever `backfill_months` is set to). Because
+        no prior stats exist on first install, prior_sum starts at 0 and the cumulative
+        counter is built correctly from the earliest backfilled interval.
+        """
+        end = datetime.now(tz=UTC)
+        # 12 months ≈ 365 days; backfill_months * 30 keeps things simple and bounded.
+        start = end - timedelta(days=self.backfill_months * 30)
+        await self._fetch_window(start, end, write_stats=True, force_start=True)
+
+    async def async_warm_cache(self) -> None:
+        """Populate the rolling 62-day cache after a restart.
+
+        Does NOT write statistics — they already exist from prior runs. Re-writing
+        them mid-series with a fresh `prior_sum` lookup would corrupt cumulative
+        counter semantics. We just refill `self.cache` for the lagging sensors.
+        """
+        end = datetime.now(tz=UTC)
+        start = end - timedelta(days=ROLLING_CACHE_DAYS)
+        await self._fetch_window(start, end, write_stats=False, force_start=True)
+
     async def _fetch_window(
         self,
         start: datetime,
