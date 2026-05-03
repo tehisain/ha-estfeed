@@ -1,0 +1,15 @@
+backfill_history:
+  fields:
+    months:
+      example: 24
+      default: 24
+      selector:
+        number:
+          min: 1
+          max: 84
+          mode: box
+    entry_id:
+      example: 0123456789abcdef
+      selector:
+        config_entry:
+          integration: estfeed

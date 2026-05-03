@@ -331,3 +331,60 @@ async def test_cache_warmup_populates_rolling_cache(hass):
     # exact count — only that the cache was populated for both kinds.
     assert len(cached) > 0
     assert len(coordinator.cache[("38ZEE-00720089-N", Kind.PRODUCTION)]) > 0
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_creates_coordinator_and_meters(hass):
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.estfeed import async_setup_entry, async_unload_entry
+    from custom_components.estfeed.const import (
+        CONF_CLIENT_ID,
+        CONF_CLIENT_SECRET,
+        CONF_FRIENDLY_NAME,
+        DOMAIN,
+    )
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CLIENT_ID: "c", CONF_CLIENT_SECRET: "s", CONF_FRIENDLY_NAME: "Home"},
+        options={},
+        unique_id="c",
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "custom_components.estfeed.EstfeedClient.list_metering_points",
+            new=AsyncMock(return_value=[_make_meter()]),
+        ),
+        patch(
+            "custom_components.estfeed.get_last_statistics",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "custom_components.estfeed.EstfeedCoordinator.async_initial_backfill",
+            new=AsyncMock(),
+        ),
+        patch(
+            "custom_components.estfeed.EstfeedCoordinator.async_warm_cache",
+            new=AsyncMock(),
+        ),
+        patch(
+            "custom_components.estfeed.EstfeedCoordinator.async_config_entry_first_refresh",
+            new=AsyncMock(),
+        ),
+        patch.object(
+            hass.config_entries, "async_forward_entry_setups", new=AsyncMock(return_value=True)
+        ),
+        patch.object(
+            hass.config_entries, "async_unload_platforms", new=AsyncMock(return_value=True)
+        ),
+    ):
+        assert await async_setup_entry(hass, entry)
+        coord = hass.data[DOMAIN][entry.entry_id]
+        assert coord.slug == "home"
+        assert len(coord.meters) == 1
+
+        assert await async_unload_entry(hass, entry)
+        assert entry.entry_id not in hass.data[DOMAIN]
