@@ -1,0 +1,64 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Estfeed",
+        "description": "Ühenda oma e-Elering API võti",
+        "data": {
+          "client_id": "Kliendi ID (UUID)",
+          "client_secret": "Kliendi salasõna",
+          "friendly_name": "Sõbralik nimi"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Autentige Estfeed uuesti",
+        "data": {
+          "client_id": "Kliendi ID (UUID)",
+          "client_secret": "Kliendi salasõna"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Vale client_id või client_secret",
+      "cannot_connect": "Estfeed API-le ei õnnestu ühenduda"
+    },
+    "abort": {
+      "already_configured": "See API võti on juba seadistatud"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Estfeed seaded",
+        "data": {
+          "resolution": "Andmete täpsus",
+          "backfill_months": "Ajalooliste andmete aken (kuud)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "consumption_yesterday": { "name": "Eilne tarbimine" },
+      "consumption_month_to_date": { "name": "Tarbimine sel kuul" },
+      "consumption_previous_month": { "name": "Eelmise kuu tarbimine" },
+      "production_yesterday": { "name": "Eilne tootmine" },
+      "production_month_to_date": { "name": "Tootmine sel kuul" },
+      "production_previous_month": { "name": "Eelmise kuu tootmine" },
+      "latest_interval": { "name": "Viimane intervall" }
+    },
+    "binary_sensor": {
+      "data_fresh": { "name": "Andmed värsked" }
+    }
+  },
+  "services": {
+    "backfill_history": {
+      "name": "Lae ajalugu",
+      "description": "Lae uuesti ja avalda pikaajaline statistika laiema ajaakna kohta.",
+      "fields": {
+        "months": { "name": "Kuud", "description": "Mitme kuu ajalugu uuesti laadida (1-84)." },
+        "entry_id": { "name": "Konfig kirje", "description": "Millise Estfeed kirje ajalugu laadida." }
+      }
+    }
+  }
+}

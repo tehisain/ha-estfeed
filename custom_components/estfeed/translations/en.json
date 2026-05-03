@@ -1,0 +1,64 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Estfeed",
+        "description": "Connect to your e-Elering API key",
+        "data": {
+          "client_id": "Client ID (UUID)",
+          "client_secret": "Client secret",
+          "friendly_name": "Friendly name"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Estfeed",
+        "data": {
+          "client_id": "Client ID (UUID)",
+          "client_secret": "Client secret"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid client_id or client_secret",
+      "cannot_connect": "Could not reach the Estfeed API"
+    },
+    "abort": {
+      "already_configured": "This API key is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Estfeed options",
+        "data": {
+          "resolution": "Data resolution",
+          "backfill_months": "Backfill window (months)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "consumption_yesterday": { "name": "Consumption yesterday" },
+      "consumption_month_to_date": { "name": "Consumption month-to-date" },
+      "consumption_previous_month": { "name": "Consumption previous month" },
+      "production_yesterday": { "name": "Production yesterday" },
+      "production_month_to_date": { "name": "Production month-to-date" },
+      "production_previous_month": { "name": "Production previous month" },
+      "latest_interval": { "name": "Latest interval" }
+    },
+    "binary_sensor": {
+      "data_fresh": { "name": "Data fresh" }
+    }
+  },
+  "services": {
+    "backfill_history": {
+      "name": "Backfill history",
+      "description": "Re-fetch and re-publish a wider window of long-term statistics.",
+      "fields": {
+        "months": { "name": "Months", "description": "How many months of history to refetch (1-84)." },
+        "entry_id": { "name": "Config entry", "description": "Which Estfeed config entry to backfill." }
+      }
+    }
+  }
+}
