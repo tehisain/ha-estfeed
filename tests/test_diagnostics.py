@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -46,14 +46,25 @@ async def test_diagnostics_redacts_secrets_and_eic_body(hass):
     )
     entry.add_to_hass(hass)
 
+    fake_recorder = MagicMock()
+
+    async def _exec(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    fake_recorder.async_add_executor_job = _exec
+
     with (
         patch(
             "custom_components.estfeed.EstfeedClient.list_metering_points",
             new=AsyncMock(return_value=[_meter()]),
         ),
         patch(
+            "custom_components.estfeed.get_instance",
+            return_value=fake_recorder,
+        ),
+        patch(
             "custom_components.estfeed.get_last_statistics",
-            new=AsyncMock(return_value={}),
+            new=MagicMock(return_value={}),
         ),
         patch(
             "custom_components.estfeed.EstfeedCoordinator.async_initial_backfill",

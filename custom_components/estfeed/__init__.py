@@ -14,6 +14,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.recorder import get_instance
 
 from .api import EstfeedClient, EstfeedError
 from .const import (
@@ -69,9 +70,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator.meters = meters
 
     needs_backfill = True
+    recorder = get_instance(hass)
     for meter in meters:
         for stream in coordinator.streams_for(meter):
-            existing = await get_last_statistics(hass, 1, stream.statistic_id, True, {"sum"})
+            existing = await recorder.async_add_executor_job(
+                get_last_statistics, hass, 1, stream.statistic_id, True, {"sum"}
+            )
             if existing.get(stream.statistic_id):
                 needs_backfill = False
                 break

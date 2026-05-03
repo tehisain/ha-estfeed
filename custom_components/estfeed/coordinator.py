@@ -9,6 +9,7 @@ from typing import Any
 
 from homeassistant.components.recorder.statistics import get_last_statistics
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.recorder import get_instance
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import (
@@ -211,7 +212,11 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         return max(latest_per_stream) + timedelta(hours=1)
 
     async def _latest_seen_for_stream(self, stream: StatisticStream) -> datetime | None:
-        last_stats = await get_last_statistics(self.hass, 1, stream.statistic_id, True, {"end"})
+        # `get_last_statistics` is a synchronous DB query; HA expects callers to
+        # offload it to the recorder's executor.
+        last_stats = await get_instance(self.hass).async_add_executor_job(
+            get_last_statistics, self.hass, 1, stream.statistic_id, True, set()
+        )
         rows = last_stats.get(stream.statistic_id)
         if not rows:
             return None
@@ -221,7 +226,9 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         return datetime.fromtimestamp(end_ms / 1000.0, tz=UTC)
 
     async def _prior_sum_for_stream(self, stream: StatisticStream) -> float:
-        last_stats = await get_last_statistics(self.hass, 1, stream.statistic_id, True, {"sum"})
+        last_stats = await get_instance(self.hass).async_add_executor_job(
+            get_last_statistics, self.hass, 1, stream.statistic_id, True, {"sum"}
+        )
         rows = last_stats.get(stream.statistic_id)
         if not rows:
             return 0.0

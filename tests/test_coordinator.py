@@ -44,6 +44,22 @@ def _hourly(start: datetime, hours: int, kwh: float = 0.5) -> list[AccountingInt
     ]
 
 
+def _fake_recorder():
+    """Stand-in for ``get_instance(hass)`` whose executor calls funcs directly.
+
+    The real ``get_instance`` looks up the recorder from ``hass.data``; tests
+    bypass the recorder entirely by patching the symbol so the executor just
+    invokes the callable inline.
+    """
+    recorder = MagicMock()
+
+    async def _exec(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    recorder.async_add_executor_job = _exec
+    return recorder
+
+
 @pytest.mark.asyncio
 async def test_coordinator_first_update_fetches_and_writes(hass):
     client = MagicMock()
@@ -67,8 +83,12 @@ async def test_coordinator_first_update_fetches_and_writes(hass):
 
     with (
         patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
             "custom_components.estfeed.coordinator.get_last_statistics",
-            new=AsyncMock(return_value={}),
+            new=MagicMock(return_value={}),
         ),
         patch(
             "custom_components.estfeed.coordinator.async_write_meter_statistics",
@@ -104,8 +124,12 @@ async def test_coordinator_uses_latest_seen_as_start(hass):
 
     with (
         patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
             "custom_components.estfeed.coordinator.get_last_statistics",
-            new=AsyncMock(return_value=fake_last_stats),
+            new=MagicMock(return_value=fake_last_stats),
         ),
         patch(
             "custom_components.estfeed.coordinator.async_write_meter_statistics",
@@ -148,8 +172,12 @@ async def test_coordinator_per_meter_error_is_skipped(hass):
 
     with (
         patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
             "custom_components.estfeed.coordinator.get_last_statistics",
-            new=AsyncMock(return_value={}),
+            new=MagicMock(return_value={}),
         ),
         patch(
             "custom_components.estfeed.coordinator.async_write_meter_statistics",
@@ -187,8 +215,12 @@ async def test_coordinator_clears_stale_error_on_success(hass):
 
     with (
         patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
             "custom_components.estfeed.coordinator.get_last_statistics",
-            new=AsyncMock(return_value={}),
+            new=MagicMock(return_value={}),
         ),
         patch(
             "custom_components.estfeed.coordinator.async_write_meter_statistics",
@@ -239,8 +271,12 @@ async def test_coordinator_carries_prior_sum_across_chunks(hass):
 
     with (
         patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
             "custom_components.estfeed.coordinator.get_last_statistics",
-            new=AsyncMock(return_value={}),
+            new=MagicMock(return_value={}),
         ),
         patch.object(coordinator, "_prior_sum_for_stream", new=prior_mock),
         patch(
@@ -281,8 +317,12 @@ async def test_initial_backfill_uses_backfill_months(hass):
 
     with (
         patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
             "custom_components.estfeed.coordinator.get_last_statistics",
-            new=AsyncMock(return_value={}),
+            new=MagicMock(return_value={}),
         ),
         patch(
             "custom_components.estfeed.coordinator.async_write_meter_statistics",
@@ -315,8 +355,12 @@ async def test_cache_warmup_populates_rolling_cache(hass):
 
     with (
         patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
             "custom_components.estfeed.coordinator.get_last_statistics",
-            new=AsyncMock(return_value={}),
+            new=MagicMock(return_value={}),
         ),
         patch(
             "custom_components.estfeed.coordinator.async_write_meter_statistics",
@@ -359,8 +403,12 @@ async def test_async_setup_entry_creates_coordinator_and_meters(hass):
             new=AsyncMock(return_value=[_make_meter()]),
         ),
         patch(
+            "custom_components.estfeed.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
             "custom_components.estfeed.get_last_statistics",
-            new=AsyncMock(return_value={}),
+            new=MagicMock(return_value={}),
         ),
         patch(
             "custom_components.estfeed.EstfeedCoordinator.async_initial_backfill",
