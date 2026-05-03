@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
+from homeassistant.components.sensor import SensorDeviceClass
+from homeassistant.const import UnitOfEnergy
 
-from custom_components.estfeed.api import AccountingInterval
-from custom_components.estfeed.const import Kind
+from custom_components.estfeed.api import AccountingInterval, MeteringPoint, Period
+from custom_components.estfeed.const import CommodityType, Kind
 from custom_components.estfeed.sensor import (
     LaggingPeriod,
+    LaggingSensor,
+    LatestIntervalSensor,
     sum_for_period,
     window_for_period,
 )
@@ -89,3 +94,67 @@ def test_sum_for_period_dst_spring_forward_23h_day():
     )
     # 23 intervals fall in the spring-forward day
     assert total == pytest.approx(23.0)
+
+
+def _meter() -> MeteringPoint:
+    return MeteringPoint(
+        eic="38ZEE-00720089-N",
+        commodity_type=CommodityType.ELECTRICITY,
+        periods=[Period(start=datetime(2019, 7, 27, 21, tzinfo=UTC), end=None)],
+    )
+
+
+def test_lagging_sensor_state_with_data():
+    coordinator = MagicMock()
+    coordinator.cache = {
+        ("38ZEE-00720089-N", Kind.CONSUMPTION): [
+            _ival(datetime(2026, 4, 28, h, tzinfo=UTC), 1.0) for h in range(24)
+        ]
+    }
+    coordinator.hass.config.time_zone = "Europe/Tallinn"
+    coordinator.slug = "home"
+    coordinator.last_meter_errors = {}
+
+    sensor = LaggingSensor(
+        coordinator=coordinator,
+        meter=_meter(),
+        kind=Kind.CONSUMPTION,
+        period=LaggingPeriod.YESTERDAY,
+        multi_meter=False,
+    )
+
+    assert sensor.unique_id == "estfeed_home_consumption_yesterday_089N"
+    assert sensor.device_class == SensorDeviceClass.ENERGY
+    assert sensor.native_unit_of_measurement == UnitOfEnergy.KILO_WATT_HOUR
+
+
+def test_lagging_sensor_unavailable_when_cache_empty():
+    coordinator = MagicMock()
+    coordinator.cache = {}
+    coordinator.hass.config.time_zone = "Europe/Tallinn"
+    coordinator.slug = "home"
+    coordinator.last_meter_errors = {}
+    coordinator.last_update_success = True
+
+    sensor = LaggingSensor(
+        coordinator=coordinator,
+        meter=_meter(),
+        kind=Kind.CONSUMPTION,
+        period=LaggingPeriod.YESTERDAY,
+        multi_meter=False,
+    )
+    assert sensor.available is False
+
+
+def test_latest_interval_sensor_returns_max_period_start():
+    coordinator = MagicMock()
+    coordinator.cache = {
+        ("38ZEE-00720089-N", Kind.CONSUMPTION): [
+            _ival(datetime(2026, 4, 28, h, tzinfo=UTC), 1.0) for h in range(3)
+        ]
+    }
+    coordinator.last_update_success = True
+    coordinator.slug = "home"
+
+    sensor = LatestIntervalSensor(coordinator=coordinator, meter=_meter())
+    assert sensor.native_value == datetime(2026, 4, 28, 2, tzinfo=UTC)
