@@ -43,3 +43,18 @@ For each metering point:
 - Data is delayed ~24 hours.
 - Cost calculation is intentionally not included; use HA's built-in Energy Dashboard cost configuration with a price entity.
 - API rate limit: 1 request per 5 seconds (per API key) — handled internally.
+
+## Development
+
+~~~bash
+pip install -e . pytest pytest-asyncio pytest-homeassistant-custom-component homeassistant aioresponses freezegun ruff mypy
+pytest tests --cov=custom_components/estfeed
+ruff check custom_components tests
+mypy
+~~~
+
+For a live end-to-end check against your own API key:
+
+~~~bash
+ESTFEED_CLIENT_ID=... ESTFEED_CLIENT_SECRET=... python scripts/smoke.py
+~~~
