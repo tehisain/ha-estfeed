@@ -74,6 +74,11 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
     def backfill_months(self) -> int:
         return int(self.options.get(CONF_BACKFILL_MONTHS, 12))
 
+    @property
+    def recent_requests(self) -> deque[dict[str, Any]]:
+        """Expose the underlying client's recent-request ring buffer for diagnostics."""
+        return self._client.recent_requests
+
     def streams_for(self, meter: MeteringPoint) -> list[StatisticStream]:
         suffix = eic_suffix(meter.eic)
         unit = "kWh" if meter.commodity_type.value == "ELECTRICITY" else "m³"
@@ -198,8 +203,10 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
     ) -> datetime:
         """Pick the start of the next fetch window for a meter.
 
-        Uses the latest seen statistic across all of the meter's streams so we
-        avoid re-fetching data we've already recorded for any kind.
+        Uses the EARLIEST seen statistic across kinds so we re-fetch any
+        partial-failure gaps on the lagging kind. Re-fetches are idempotent —
+        prior_sum carrying preserves cumulative sum continuity, and HA's
+        external statistics dedupe on (statistic_id, start).
         """
         latest_per_stream: list[datetime] = []
         for stream in streams:
@@ -208,8 +215,7 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
                 latest_per_stream.append(seen)
         if not latest_per_stream:
             return default_start
-        # TODO: revisit if partial-kind failures observed — switch to min() with overlap window.
-        return max(latest_per_stream) + timedelta(hours=1)
+        return min(latest_per_stream) + timedelta(hours=1)
 
     async def _latest_seen_for_stream(self, stream: StatisticStream) -> datetime | None:
         # `get_last_statistics` is a synchronous DB query; HA expects callers to

@@ -46,8 +46,11 @@ For each metering point:
 
 ## Development
 
+The `editable_mode=compat` flag avoids a setuptools/HA loader incompatibility where the default editable install creates a virtual path entry that HA's `async_get_custom_components` cannot iterate.
+
 ~~~bash
-pip install -e . pytest pytest-asyncio pytest-homeassistant-custom-component homeassistant aioresponses freezegun ruff mypy
+pip install -e . --config-settings editable_mode=compat
+pip install pytest pytest-asyncio pytest-cov pytest-homeassistant-custom-component homeassistant aioresponses freezegun ruff mypy
 pytest tests --cov=custom_components/estfeed
 ruff check custom_components tests
 mypy

@@ -48,5 +48,5 @@ async def async_get_config_entry_diagnostics(
             }
             for m in coordinator.meters
         ],
-        "recent_requests": list(coordinator._client.recent_requests),
+        "recent_requests": list(coordinator.recent_requests),
     }
