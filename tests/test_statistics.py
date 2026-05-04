@@ -191,3 +191,71 @@ async def test_async_write_meter_statistics_noop_when_no_rows(hass):
     mock_add.assert_not_called()
     # No rows produced → return prior_sum unchanged for the chunk loop to chain.
     assert result == 42.0
+
+
+def test_compute_statistic_rows_snaps_to_top_of_hour():
+    """Regression: Estfeed API can return intervals at HH:32:13.598 if the
+    request start was non-aligned. HA's recorder requires top-of-hour
+    timestamps, so rows must be snapped down."""
+    intervals = [
+        AccountingInterval(
+            period_start=datetime(2026, 5, 2, 10, 32, 13, 598481, tzinfo=UTC),
+            consumption_kwh=0.35,
+            production_kwh=None,
+            consumption_m3=None,
+            production_m3=None,
+        ),
+        AccountingInterval(
+            period_start=datetime(2026, 5, 2, 11, 32, 13, 598481, tzinfo=UTC),
+            consumption_kwh=0.348,
+            production_kwh=None,
+            consumption_m3=None,
+            production_m3=None,
+        ),
+    ]
+    rows = compute_statistic_rows(intervals, Kind.CONSUMPTION, prior_sum=0.0)
+    starts = [r["start"] for r in rows]
+    assert starts == [
+        datetime(2026, 5, 2, 10, 0, tzinfo=UTC),
+        datetime(2026, 5, 2, 11, 0, tzinfo=UTC),
+    ]
+    for s in starts:
+        assert s.minute == 0 and s.second == 0 and s.microsecond == 0
+
+
+def test_compute_statistic_rows_aggregates_subhour_intervals():
+    """Quarter-hour intervals in the same hour are summed into one bucket."""
+    intervals = [
+        AccountingInterval(
+            period_start=datetime(2026, 5, 2, 10, 0, tzinfo=UTC),
+            consumption_kwh=0.1,
+            production_kwh=None,
+            consumption_m3=None,
+            production_m3=None,
+        ),
+        AccountingInterval(
+            period_start=datetime(2026, 5, 2, 10, 15, tzinfo=UTC),
+            consumption_kwh=0.2,
+            production_kwh=None,
+            consumption_m3=None,
+            production_m3=None,
+        ),
+        AccountingInterval(
+            period_start=datetime(2026, 5, 2, 10, 30, tzinfo=UTC),
+            consumption_kwh=0.3,
+            production_kwh=None,
+            consumption_m3=None,
+            production_m3=None,
+        ),
+        AccountingInterval(
+            period_start=datetime(2026, 5, 2, 10, 45, tzinfo=UTC),
+            consumption_kwh=0.4,
+            production_kwh=None,
+            consumption_m3=None,
+            production_m3=None,
+        ),
+    ]
+    rows = compute_statistic_rows(intervals, Kind.CONSUMPTION, prior_sum=0.0)
+    assert len(rows) == 1
+    assert rows[0]["start"] == datetime(2026, 5, 2, 10, 0, tzinfo=UTC)
+    assert rows[0]["sum"] == pytest.approx(1.0)

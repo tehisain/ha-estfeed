@@ -436,3 +436,47 @@ async def test_async_setup_entry_creates_coordinator_and_meters(hass):
 
         assert await async_unload_entry(hass, entry)
         assert entry.entry_id not in hass.data[DOMAIN]
+
+
+@pytest.mark.asyncio
+async def test_coordinator_snaps_request_start_to_top_of_hour(hass):
+    """Regression: API anchors hourly intervals to the requested start.
+    If we send a non-aligned timestamp, intervals come back at HH:32:13
+    and HA's recorder rejects them. Coordinator must snap before fetching."""
+    client = MagicMock()
+    client.list_metering_points = AsyncMock(return_value=[_make_meter()])
+    client.get_metering_data = AsyncMock(
+        return_value=[MeterData(eic="38ZEE-00720089-N", intervals=[])]
+    )
+
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={CONF_RESOLUTION: Resolution.HOUR.value, CONF_BACKFILL_MONTHS: 12},
+    )
+    coordinator.meters = [_make_meter()]
+
+    with (
+        patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.get_last_statistics",
+            new=MagicMock(return_value={}),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.async_write_meter_statistics",
+            new=AsyncMock(),
+        ),
+    ):
+        await coordinator._async_update_data()
+
+    # Every call to get_metering_data must use a top-of-hour start.
+    assert client.get_metering_data.call_args_list, "client should have been called"
+    for call in client.get_metering_data.call_args_list:
+        start = call.args[0]
+        assert start.minute == 0 and start.second == 0 and start.microsecond == 0, (
+            f"non-aligned start {start!r}"
+        )

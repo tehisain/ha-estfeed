@@ -42,6 +42,16 @@ _ELECTRICITY_KINDS = (Kind.CONSUMPTION, Kind.PRODUCTION)
 _GAS_KINDS = (Kind.CONSUMPTION, Kind.PRODUCTION)
 
 
+def _snap_to_resolution(dt: datetime, resolution: Resolution) -> datetime:
+    """Snap a timestamp down to the nearest boundary the API expects."""
+    if resolution == Resolution.QUARTER_HOUR:
+        return dt.replace(minute=(dt.minute // 15) * 15, second=0, microsecond=0)
+    if resolution == Resolution.DAY:
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    # HOUR (default), WEEK, MONTH all snap to top of hour.
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+
 class EstfeedCoordinator(DataUpdateCoordinator[None]):
     """Hourly poller + statistics ingester."""
 
@@ -141,6 +151,12 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         force_start: bool,
     ) -> None:
         """Fetch [start, end] in 31-day chunks, optionally writing stats per chunk."""
+        # Estfeed anchors hourly intervals to the requested start_datetime — if
+        # we send a non-aligned timestamp, the API returns intervals at the
+        # same minute/second offset, which HA's recorder rejects. Snap to the
+        # resolution boundary so the API returns clean top-of-hour buckets.
+        start = _snap_to_resolution(start, self.resolution)
+        end = _snap_to_resolution(end, self.resolution)
         for meter in self.meters:
             await self._fetch_meter_window(
                 meter, start, end, write_stats=write_stats, force_start=force_start

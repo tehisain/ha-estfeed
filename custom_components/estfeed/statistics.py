@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
 from homeassistant.components.recorder.statistics import async_add_external_statistics
@@ -10,6 +11,18 @@ from homeassistant.core import HomeAssistant
 
 from .api import AccountingInterval
 from .const import DOMAIN, Kind
+
+# HA 2026.11 will require `mean_type` in StatisticMetaData; older HA versions
+# don't expose StatisticMeanType. Detect at import time and only set the field
+# when the enum is available.
+try:
+    from homeassistant.components.recorder.models import (  # type: ignore[attr-defined]
+        StatisticMeanType,
+    )
+
+    _MEAN_TYPE_NONE: Any = StatisticMeanType.NONE
+except ImportError:
+    _MEAN_TYPE_NONE = None
 
 # Public alias kept for backwards compatibility with callers / tests that import
 # StatisticRow from this module. The recorder's StatisticData TypedDict already
@@ -52,19 +65,27 @@ def compute_statistic_rows(
 ) -> list[StatisticData]:
     """Build cumulative-sum statistic rows from raw intervals.
 
-    Skips intervals where the relevant value is None. Output is sorted by start
-    ascending. `state` is set equal to `sum` (counter semantics for HA's
-    statistics display).
+    Skips intervals where the relevant value is None. Each row's ``start`` is
+    snapped down to the top of the hour because HA's recorder requires
+    statistics timestamps to have minute=second=microsecond=0. If multiple
+    sub-hourly intervals fall in the same hour bucket, their values are
+    summed before the cumulative running total advances. Output is sorted by
+    start ascending. ``state`` equals ``sum`` (counter semantics).
     """
-    sorted_ivals = sorted(intervals, key=lambda i: i.period_start)
-    rows: list[StatisticData] = []
-    running = prior_sum
-    for ival in sorted_ivals:
+    # Aggregate values into hourly buckets keyed by snapped start.
+    hourly: dict[Any, float] = {}
+    for ival in intervals:
         value = _interval_value(ival, kind)
         if value is None:
             continue
-        running += float(value)
-        rows.append({"start": ival.period_start, "state": running, "sum": running})
+        bucket = ival.period_start.replace(minute=0, second=0, microsecond=0)
+        hourly[bucket] = hourly.get(bucket, 0.0) + float(value)
+
+    rows: list[StatisticData] = []
+    running = prior_sum
+    for start in sorted(hourly):
+        running += hourly[start]
+        rows.append({"start": start, "state": running, "sum": running})
     return rows
 
 
@@ -103,6 +124,10 @@ async def async_write_meter_statistics(
         "has_sum": True,
         "has_mean": False,
     }
+    if _MEAN_TYPE_NONE is not None:
+        # Required from HA 2026.11; absent on older HA versions where the
+        # enum doesn't exist (the metadata key is ignored there).
+        metadata["mean_type"] = _MEAN_TYPE_NONE  # type: ignore[typeddict-unknown-key]
     # async_add_external_statistics is a synchronous @callback in this HA version
     # (inspect.iscoroutinefunction returned False); no await needed.
     async_add_external_statistics(hass, metadata, rows)
