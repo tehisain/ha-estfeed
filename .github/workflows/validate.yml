@@ -13,9 +13,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: home-assistant/actions/hassfest@master
 
-  # HACS validation is intentionally disabled until the integration ships
-  # brand assets (custom_components/estfeed/brand/icon.png) or is listed in
-  # the home-assistant/brands repository. Re-enable once either lands.
+  hacs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hacs/action@main
+        with:
+          category: integration
 
   lint-and-test:
     runs-on: ubuntu-latest
