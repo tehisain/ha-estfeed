@@ -246,6 +246,36 @@ async def test_500_raises_api_error(client):
             await client._request_json("GET", "/api/public/v1/x")
 
 
+async def test_non_json_error_body_maps_to_status_exception(client):
+    """Regression: 5xx responses with HTML/empty bodies must map by status,
+    not crash with JSONDecodeError."""
+    with aioresponses() as mocked:
+        mocked.post(
+            KEYCLOAK_TOKEN_URL,
+            payload={"access_token": "t", "expires_in": 300, "token_type": "Bearer"},
+        )
+        mocked.get(
+            "https://estfeed.elering.ee/api/public/v1/x",
+            status=503,
+            body="<html><body>Service Unavailable</body></html>",
+            content_type="text/html",
+        )
+        with pytest.raises(EstfeedAPIError):
+            await client._request_json("GET", "/api/public/v1/x")
+
+
+async def test_empty_body_401_maps_to_auth_error(client):
+    """Regression: empty response bodies on 401 should map to EstfeedAuthError."""
+    with aioresponses() as mocked:
+        mocked.post(
+            KEYCLOAK_TOKEN_URL,
+            payload={"access_token": "t", "expires_in": 300, "token_type": "Bearer"},
+        )
+        mocked.get("https://estfeed.elering.ee/api/public/v1/x", status=401, body="")
+        with pytest.raises(EstfeedAuthError):
+            await client._request_json("GET", "/api/public/v1/x")
+
+
 async def test_timeout_raises_timeout_error(client):
     with aioresponses() as mocked:
         mocked.post(

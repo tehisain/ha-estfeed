@@ -105,15 +105,16 @@ class EstfeedConfigFlow(ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
-        return EstfeedOptionsFlow(config_entry)
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:  # noqa: ARG004
+        return EstfeedOptionsFlow()
 
 
 class EstfeedOptionsFlow(OptionsFlow):
-    """Handle Estfeed integration options."""
+    """Handle Estfeed integration options.
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        self.config_entry = config_entry
+    HA assigns ``self.config_entry`` automatically when instantiating the flow;
+    in modern versions it's a read-only property, so don't override __init__.
+    """
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:

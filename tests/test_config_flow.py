@@ -131,3 +131,21 @@ async def test_reauth_flow_replaces_credentials(hass):
     assert result2["reason"] == "reauth_successful"
     assert entry.data[CONF_CLIENT_ID] == "new"
     assert entry.data[CONF_CLIENT_SECRET] == "new"
+
+
+@pytest.mark.asyncio
+async def test_options_flow_opens_without_setting_config_entry(hass):
+    """Regression: modern HA's OptionsFlow.config_entry is read-only.
+    The flow must not try to assign self.config_entry in __init__."""
+    await _setup_recorder(hass)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CLIENT_ID: "c", CONF_CLIENT_SECRET: "s", CONF_FRIENDLY_NAME: "Home"},
+        options={},
+        unique_id="c",
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "init"

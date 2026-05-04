@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections import deque
@@ -188,7 +189,15 @@ class EstfeedClient:
                             "duration_ms": duration_ms,
                         }
                     )
-                    payload = await resp.json()
+                    body = await resp.read()
+                    try:
+                        payload = json.loads(body) if body else None
+                    except ValueError:
+                        # Non-JSON body (HTML error page, gateway timeout,
+                        # maintenance notice, etc.). Surface the raw text so
+                        # status-based error mapping in _request_json still
+                        # produces a typed Estfeed exception.
+                        payload = body.decode(errors="replace")
                     return resp.status, payload
             finally:
                 self._last_request_at = time.monotonic()
