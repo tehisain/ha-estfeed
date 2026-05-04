@@ -123,7 +123,7 @@ def test_lagging_sensor_state_with_data():
         multi_meter=False,
     )
 
-    assert sensor.unique_id == "estfeed_home_consumption_yesterday_089N"
+    assert sensor.unique_id == "estfeed_home_consumption_yesterday_089n"
     assert sensor.device_class == SensorDeviceClass.ENERGY
     assert sensor.native_unit_of_measurement == UnitOfEnergy.KILO_WATT_HOUR
 

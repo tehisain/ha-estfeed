@@ -19,22 +19,33 @@ from custom_components.estfeed.statistics import (
 
 
 def test_eic_suffix():
-    assert eic_suffix("38ZEE-00720089-N") == "089N"
-    assert eic_suffix("XYZW-12345678-AB") == "78AB"
+    assert eic_suffix("38ZEE-00720089-N") == "089n"
+    assert eic_suffix("XYZW-12345678-AB") == "78ab"
+
+
+def test_statistic_id_matches_ha_recorder_regex():
+    """HA recorder validates statistic_id against ^[a-z0-9_]+:[a-z0-9_]+$.
+    Capital letters in the EIC suffix would fail validation."""
+    import re
+
+    sid = build_statistic_id(
+        "home", Kind.CONSUMPTION, eic_suffix("38ZEE-00720089-N"), multi_meter=False
+    )
+    assert re.fullmatch(r"[a-z0-9_]+:[a-z0-9_]+", sid), sid
 
 
 def test_build_statistic_id_single_meter():
     assert (
-        build_statistic_id("home", Kind.CONSUMPTION, "089N", multi_meter=False)
-        == "estfeed:home_consumption_089N"
+        build_statistic_id("home", Kind.CONSUMPTION, "089n", multi_meter=False)
+        == "estfeed:home_consumption_089n"
     )
 
 
 def test_build_statistic_id_multi_meter():
     # When multiple meters share an entry, suffix is appended even if slug carries it.
     assert (
-        build_statistic_id("home", Kind.PRODUCTION, "089N", multi_meter=True)
-        == "estfeed:home_production_089N"
+        build_statistic_id("home", Kind.PRODUCTION, "089n", multi_meter=True)
+        == "estfeed:home_production_089n"
     )
 
 
@@ -131,7 +142,7 @@ async def test_async_write_meter_statistics_calls_external_stats(hass):
         )
     ]
     stream = StatisticStream(
-        statistic_id="estfeed:home_consumption_089N",
+        statistic_id="estfeed:home_consumption_089n",
         name="Home consumption (38ZEE-00720089-N)",
         unit="kWh",
         kind=Kind.CONSUMPTION,
@@ -144,7 +155,7 @@ async def test_async_write_meter_statistics_calls_external_stats(hass):
 
     mock_add.assert_called_once()
     metadata, rows = mock_add.call_args.args[1], mock_add.call_args.args[2]
-    assert metadata["statistic_id"] == "estfeed:home_consumption_089N"
+    assert metadata["statistic_id"] == "estfeed:home_consumption_089n"
     assert metadata["source"] == "estfeed"
     assert metadata["unit_of_measurement"] == "kWh"
     assert metadata["has_sum"] is True
@@ -167,7 +178,7 @@ async def test_async_write_meter_statistics_noop_when_no_rows(hass):
         )
     ]
     stream = StatisticStream(
-        statistic_id="estfeed:home_consumption_089N",
+        statistic_id="estfeed:home_consumption_089n",
         name="x",
         unit="kWh",
         kind=Kind.CONSUMPTION,

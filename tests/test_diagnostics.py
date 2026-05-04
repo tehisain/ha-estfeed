@@ -95,5 +95,5 @@ async def test_diagnostics_redacts_secrets_and_eic_body(hass):
 
     assert diag["entry"]["data"][CONF_CLIENT_SECRET] == "**REDACTED**"
     assert diag["entry"]["data"][CONF_CLIENT_ID] == "**REDACTED**"
-    assert diag["meters"][0]["eic"].endswith("089N")
+    assert diag["meters"][0]["eic"].endswith("089n")
     assert "38ZEE" not in diag["meters"][0]["eic"]

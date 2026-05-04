@@ -19,7 +19,10 @@ StatisticRow = StatisticData
 
 def eic_suffix(eic: str) -> str:
     """Last 4 alphanumeric characters of an EIC, no hyphens, used to disambiguate."""
-    return "".join(ch for ch in eic if ch.isalnum())[-4:]
+    # Lowercased: HA recorder validates statistic_id against
+    # ^[a-z0-9_]+:[a-z0-9_]+$, so capitals like the trailing "N" of an EIC
+    # would be rejected by async_add_external_statistics.
+    return "".join(ch for ch in eic if ch.isalnum()).lower()[-4:]
 
 
 def build_statistic_id(slug: str, kind: Kind, suffix: str, *, multi_meter: bool) -> str:
