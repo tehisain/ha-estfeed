@@ -138,11 +138,11 @@ async def test_coordinator_uses_latest_seen_as_start(hass):
     ):
         await coordinator._async_update_data()
 
-    # First call should request from latest_seen + 1 hour onwards.
-    # Our get_metering_data signature is (start, end, resolution, eics=...) so
-    # args[0] is the start datetime.
+    # First call should request from latest_seen onwards (NOT +1h). The
+    # stored row's `end` equals the next bucket's `start`, so adding an
+    # extra hour would skip a bucket.
     args, _ = client.get_metering_data.call_args
-    assert args[0] == datetime(2026, 4, 29, 0, tzinfo=UTC)
+    assert args[0] == datetime(2026, 4, 28, 23, tzinfo=UTC)
 
 
 @pytest.mark.asyncio
@@ -436,6 +436,96 @@ async def test_async_setup_entry_creates_coordinator_and_meters(hass):
 
         assert await async_unload_entry(hass, entry)
         assert entry.entry_id not in hass.data[DOMAIN]
+
+
+@pytest.mark.asyncio
+async def test_coordinator_filters_intervals_per_stream(hass):
+    """Regression: when production lags consumption (e.g., a consume-only
+    meter that reported a non-null production value once long ago), the
+    leading consumption stream must NOT receive intervals before its own
+    latest_seen. Otherwise its historical rows get rewritten with prior_sum
+    chained from the *current* latest sum, inflating past-month consumption
+    every tick.
+    """
+    meter = _make_meter()
+    consumption_seen = datetime(2026, 5, 1, 0, tzinfo=UTC)
+    production_seen = datetime(2026, 4, 25, 0, tzinfo=UTC)
+    fetch_start = datetime(2026, 4, 1, 0, tzinfo=UTC)
+    fetch_end = datetime(2026, 5, 2, 0, tzinfo=UTC)
+
+    # API returns 7 days of hourly intervals starting at production_seen,
+    # covering the gap that production needs to backfill plus the new hours
+    # consumption needs.
+    intervals = _hourly(production_seen, hours=24 * 7)
+    client = MagicMock()
+    client.list_metering_points = AsyncMock(return_value=[meter])
+    client.get_metering_data = AsyncMock(
+        return_value=[MeterData(eic="38ZEE-00720089-N", intervals=intervals)]
+    )
+
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={CONF_RESOLUTION: Resolution.HOUR.value, CONF_BACKFILL_MONTHS: 12},
+    )
+    coordinator.meters = [meter]
+
+    async def fake_latest_seen(stream):
+        return consumption_seen if stream.kind == Kind.CONSUMPTION else production_seen
+
+    write_mock = AsyncMock(return_value=0.0)
+
+    with (
+        patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.get_last_statistics",
+            new=MagicMock(return_value={}),
+        ),
+        patch.object(coordinator, "_latest_seen_for_stream", new=fake_latest_seen),
+        patch.object(coordinator, "_prior_sum_for_stream", new=AsyncMock(return_value=0.0)),
+        patch(
+            "custom_components.estfeed.coordinator.async_write_meter_statistics",
+            new=write_mock,
+        ),
+    ):
+        await coordinator._fetch_window(
+            fetch_start, fetch_end, write_stats=True, force_start=False
+        )
+
+    # API fetch starts at the *earliest* seen (production_seen) so the lagging
+    # stream can backfill its gap.
+    assert client.get_metering_data.call_args.args[0] == production_seen
+
+    consumption_calls = [
+        c for c in write_mock.call_args_list if c.args[1].kind == Kind.CONSUMPTION
+    ]
+    production_calls = [
+        c for c in write_mock.call_args_list if c.args[1].kind == Kind.PRODUCTION
+    ]
+    assert consumption_calls and production_calls
+
+    # Consumption: every interval handed to the writer must be >= consumption_seen.
+    # If anything earlier slipped through, the writer would chain prior_sum
+    # (= current consumption sum) onto an already-recorded bucket, inflating it.
+    for call in consumption_calls:
+        for ival in call.args[2]:
+            assert ival.period_start >= consumption_seen, (
+                f"consumption received {ival.period_start} < {consumption_seen} — "
+                "this would re-write a historical bucket with an inflated sum"
+            )
+
+    # Production: must receive intervals from production_seen onwards, including
+    # ones older than consumption_seen (the gap to backfill).
+    for call in production_calls:
+        for ival in call.args[2]:
+            assert ival.period_start >= production_seen
+    assert any(
+        any(i.period_start < consumption_seen for i in c.args[2]) for c in production_calls
+    ), "production should backfill the gap between production_seen and consumption_seen"
 
 
 @pytest.mark.asyncio

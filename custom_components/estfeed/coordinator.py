@@ -172,10 +172,24 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         force_start: bool,
     ) -> None:
         streams = self.streams_for(meter)
-        # Single fetch per (meter, chunk) covers all kinds — the API returns
-        # consumption and production together. Use the latest-seen across kinds
-        # so we don't re-fetch already-recorded data.
-        chunk_start = start if force_start else await self._chunk_start_for_meter(streams, start)
+        # Per-stream resume point: each kind tracks its own latest-seen.
+        # Sharing one chunk_start across kinds caused the leading kind's
+        # historical rows to be re-written with an inflated prior_sum every
+        # tick whenever a sibling kind lagged (e.g., production for a
+        # consume-only meter that briefly reported a non-null value).
+        # `None` means "no prior data — accept everything we fetch".
+        per_stream_start: dict[str, datetime | None] = {}
+        if force_start:
+            for stream in streams:
+                per_stream_start[stream.statistic_id] = None
+        else:
+            for stream in streams:
+                per_stream_start[stream.statistic_id] = await self._latest_seen_for_stream(stream)
+        # One API call covers all kinds. Fetch from the earliest seen so a
+        # lagging stream can backfill its gap; if no stream has been seen yet,
+        # fall back to the caller's `start`.
+        seen = [s for s in per_stream_start.values() if s is not None]
+        fetch_start = start if force_start or not seen else min(seen)
         # Read prior_sum ONCE before the chunk loop (per stream) and advance
         # locally as we write. HA's recorder may not flush statistics writes
         # synchronously, so re-reading get_last_statistics inside the loop
@@ -184,7 +198,7 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         if write_stats:
             for stream in streams:
                 prior_sums[stream.statistic_id] = await self._prior_sum_for_stream(stream)
-        cursor = chunk_start
+        cursor = fetch_start
         while cursor < end:
             chunk_end = min(cursor + timedelta(days=MAX_DAYS_PER_REQUEST), end)
             results = await self._client.get_metering_data(
@@ -204,34 +218,24 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
                 # state so consumers see the meter as healthy again (M8).
                 self.last_meter_errors.pop(md.eic, None)
                 for stream in streams:
+                    threshold = per_stream_start[stream.statistic_id]
+                    # Filter intervals per stream so a leading kind never
+                    # overwrites its already-stored rows. `_latest_seen_for_stream`
+                    # returns the previous row's `end`, which equals the next
+                    # row's `start` — no +1h offset needed.
+                    if threshold is None:
+                        relevant = md.intervals
+                    else:
+                        relevant = [i for i in md.intervals if i.period_start >= threshold]
                     if write_stats:
                         prior_sums[stream.statistic_id] = await async_write_meter_statistics(
                             self.hass,
                             stream,
-                            md.intervals,
+                            relevant,
                             prior_sum=prior_sums[stream.statistic_id],
                         )
-                    self._update_cache(meter.eic, stream.kind, md.intervals)
+                    self._update_cache(meter.eic, stream.kind, relevant)
             cursor = chunk_end
-
-    async def _chunk_start_for_meter(
-        self, streams: list[StatisticStream], default_start: datetime
-    ) -> datetime:
-        """Pick the start of the next fetch window for a meter.
-
-        Uses the EARLIEST seen statistic across kinds so we re-fetch any
-        partial-failure gaps on the lagging kind. Re-fetches are idempotent —
-        prior_sum carrying preserves cumulative sum continuity, and HA's
-        external statistics dedupe on (statistic_id, start).
-        """
-        latest_per_stream: list[datetime] = []
-        for stream in streams:
-            seen = await self._latest_seen_for_stream(stream)
-            if seen is not None:
-                latest_per_stream.append(seen)
-        if not latest_per_stream:
-            return default_start
-        return min(latest_per_stream) + timedelta(hours=1)
 
     async def _latest_seen_for_stream(self, stream: StatisticStream) -> datetime | None:
         # `get_last_statistics` is a synchronous DB query; HA expects callers to
