@@ -492,20 +492,14 @@ async def test_coordinator_filters_intervals_per_stream(hass):
             new=write_mock,
         ),
     ):
-        await coordinator._fetch_window(
-            fetch_start, fetch_end, write_stats=True, force_start=False
-        )
+        await coordinator._fetch_window(fetch_start, fetch_end, write_stats=True, force_start=False)
 
     # API fetch starts at the *earliest* seen (production_seen) so the lagging
     # stream can backfill its gap.
     assert client.get_metering_data.call_args.args[0] == production_seen
 
-    consumption_calls = [
-        c for c in write_mock.call_args_list if c.args[1].kind == Kind.CONSUMPTION
-    ]
-    production_calls = [
-        c for c in write_mock.call_args_list if c.args[1].kind == Kind.PRODUCTION
-    ]
+    consumption_calls = [c for c in write_mock.call_args_list if c.args[1].kind == Kind.CONSUMPTION]
+    production_calls = [c for c in write_mock.call_args_list if c.args[1].kind == Kind.PRODUCTION]
     assert consumption_calls and production_calls
 
     # Consumption: every interval handed to the writer must be >= consumption_seen.
