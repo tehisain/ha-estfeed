@@ -186,10 +186,15 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
             for stream in streams:
                 per_stream_start[stream.statistic_id] = await self._latest_seen_for_stream(stream)
         # One API call covers all kinds. Fetch from the earliest seen so a
-        # lagging stream can backfill its gap; if no stream has been seen yet,
-        # fall back to the caller's `start`.
+        # lagging stream can backfill its gap, but bound by the caller's
+        # `start` on regular ticks — otherwise a stream stuck far in the
+        # past (e.g., a single non-null production reading from 12 months
+        # ago for a consume-only meter that has been null since) would
+        # force every tick to download a year of data and exceed HA's
+        # bootstrap stage-2 timeout. force_start callers (initial backfill,
+        # warm cache, manual service) still get the full window.
         seen = [s for s in per_stream_start.values() if s is not None]
-        fetch_start = start if force_start or not seen else min(seen)
+        fetch_start = start if force_start or not seen else max(start, min(seen))
         # Read prior_sum ONCE before the chunk loop (per stream) and advance
         # locally as we write. HA's recorder may not flush statistics writes
         # synchronously, so re-reading get_last_statistics inside the loop

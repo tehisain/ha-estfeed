@@ -523,6 +523,114 @@ async def test_coordinator_filters_intervals_per_stream(hass):
 
 
 @pytest.mark.asyncio
+async def test_coordinator_fetch_start_bounded_by_caller_start(hass):
+    """Regression: when a stream is stuck far in the past (e.g., a
+    consume-only meter with a single non-null production reading from
+    12 months ago), the regular tick must NOT fetch from that stuck
+    point. Fetching ~12 months of intervals every hour exceeds HA's
+    bootstrap stage-2 timeout (300s). The fetch is bounded by the
+    caller's `start`; deep history is reserved for force_start callers
+    (initial backfill, warm cache, the backfill service).
+    """
+    meter = _make_meter()
+    consumption_seen = datetime(2026, 5, 5, 0, tzinfo=UTC)
+    stale_production_seen = datetime(2025, 5, 5, 0, tzinfo=UTC)  # 12 months stale
+    fetch_start = datetime(2026, 4, 5, 0, tzinfo=UTC)  # caller window: 30 days
+    fetch_end = datetime(2026, 5, 5, 0, tzinfo=UTC)
+
+    client = MagicMock()
+    client.list_metering_points = AsyncMock(return_value=[meter])
+    client.get_metering_data = AsyncMock(
+        return_value=[MeterData(eic="38ZEE-00720089-N", intervals=[])]
+    )
+
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={CONF_RESOLUTION: Resolution.HOUR.value, CONF_BACKFILL_MONTHS: 12},
+    )
+    coordinator.meters = [meter]
+
+    async def fake_latest_seen(stream):
+        return consumption_seen if stream.kind == Kind.CONSUMPTION else stale_production_seen
+
+    with (
+        patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.get_last_statistics",
+            new=MagicMock(return_value={}),
+        ),
+        patch.object(coordinator, "_latest_seen_for_stream", new=fake_latest_seen),
+        patch.object(coordinator, "_prior_sum_for_stream", new=AsyncMock(return_value=0.0)),
+        patch(
+            "custom_components.estfeed.coordinator.async_write_meter_statistics",
+            new=AsyncMock(return_value=0.0),
+        ),
+    ):
+        await coordinator._fetch_window(fetch_start, fetch_end, write_stats=True, force_start=False)
+
+    # API fetch must be clamped to the caller's `fetch_start`, not the
+    # 12-month-stale production_seen. A 12-month per-tick fetch would
+    # blow HA's bootstrap timeout.
+    assert client.get_metering_data.call_args.args[0] == fetch_start
+
+
+@pytest.mark.asyncio
+async def test_coordinator_force_start_ignores_bound(hass):
+    """force_start callers (initial backfill, warm cache, manual service)
+    must still fetch from `start` regardless of any existing latest_seen.
+    The bound only protects regular ticks."""
+    meter = _make_meter()
+    fetch_start = datetime(2025, 5, 5, 0, tzinfo=UTC)  # 12 months back
+    fetch_end = datetime(2026, 5, 5, 0, tzinfo=UTC)
+
+    client = MagicMock()
+    client.list_metering_points = AsyncMock(return_value=[meter])
+    client.get_metering_data = AsyncMock(
+        return_value=[MeterData(eic="38ZEE-00720089-N", intervals=[])]
+    )
+
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={CONF_RESOLUTION: Resolution.HOUR.value, CONF_BACKFILL_MONTHS: 12},
+    )
+    coordinator.meters = [meter]
+
+    # Even with a recent latest_seen, force_start must override and pull
+    # from the requested start.
+    recent_seen = datetime(2026, 5, 4, 23, tzinfo=UTC)
+
+    async def fake_latest_seen(_stream):
+        return recent_seen
+
+    with (
+        patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.get_last_statistics",
+            new=MagicMock(return_value={}),
+        ),
+        patch.object(coordinator, "_latest_seen_for_stream", new=fake_latest_seen),
+        patch(
+            "custom_components.estfeed.coordinator.async_write_meter_statistics",
+            new=AsyncMock(return_value=0.0),
+        ),
+    ):
+        await coordinator._fetch_window(fetch_start, fetch_end, write_stats=True, force_start=True)
+
+    # force_start: fetch begins at the caller's `start`, not at recent_seen.
+    assert client.get_metering_data.call_args_list[0].args[0] == fetch_start
+
+
+@pytest.mark.asyncio
 async def test_coordinator_snaps_request_start_to_top_of_hour(hass):
     """Regression: API anchors hourly intervals to the requested start.
     If we send a non-aligned timestamp, intervals come back at HH:32:13
