@@ -24,6 +24,15 @@ try:
 except ImportError:
     _MEAN_TYPE_NONE = None
 
+# HA 2026.11 will also require `unit_class` in StatisticMetaData. Older HA
+# versions ignore the key; declaring it now silences the deprecation warning
+# and keeps statistics working past the cutover. Values match the converter
+# UNIT_CLASS attributes in homeassistant.util.unit_conversion.
+_UNIT_CLASS_BY_UNIT = {
+    "kWh": "energy",
+    "m³": "volume",
+}
+
 # Public alias kept for backwards compatibility with callers / tests that import
 # StatisticRow from this module. The recorder's StatisticData TypedDict already
 # allows start/state/sum (plus optional fields), so we use it directly.
@@ -128,6 +137,10 @@ async def async_write_meter_statistics(
         # Required from HA 2026.11; absent on older HA versions where the
         # enum doesn't exist (the metadata key is ignored there).
         metadata["mean_type"] = _MEAN_TYPE_NONE  # type: ignore[typeddict-unknown-key]
+    unit_class = _UNIT_CLASS_BY_UNIT.get(stream.unit)
+    if unit_class is not None:
+        # Required from HA 2026.11; older HA versions ignore unknown keys.
+        metadata["unit_class"] = unit_class  # type: ignore[typeddict-unknown-key]
     # async_add_external_statistics is a synchronous @callback in this HA version
     # (inspect.iscoroutinefunction returned False); no await needed.
     async_add_external_statistics(hass, metadata, rows)

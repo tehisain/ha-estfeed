@@ -160,10 +160,43 @@ async def test_async_write_meter_statistics_calls_external_stats(hass):
     assert metadata["unit_of_measurement"] == "kWh"
     assert metadata["has_sum"] is True
     assert metadata["has_mean"] is False
+    # unit_class becomes mandatory in HA 2026.11; kWh maps to energy.
+    assert metadata["unit_class"] == "energy"
     assert len(rows) == 1
     assert rows[0]["sum"] == 1.0
     # Returns final running sum so multi-chunk callers can chain prior_sum.
     assert result == 1.0
+
+
+@pytest.mark.asyncio
+async def test_async_write_meter_statistics_sets_volume_unit_class_for_gas(hass):
+    """m³ (gas meters) must declare unit_class=volume so HA's recorder
+    routes the stream through VolumeConverter, not silently drop it after
+    the 2026.11 cutover."""
+    intervals = [
+        AccountingInterval(
+            period_start=datetime(2026, 4, 27, 0, tzinfo=UTC),
+            consumption_kwh=None,
+            production_kwh=None,
+            consumption_m3=2.0,
+            production_m3=None,
+        )
+    ]
+    stream = StatisticStream(
+        statistic_id="estfeed:home_consumption_089n",
+        name="Home consumption (gas)",
+        unit="m³",
+        kind=Kind.CONSUMPTION,
+    )
+    with patch(
+        "custom_components.estfeed.statistics.async_add_external_statistics",
+        new=Mock(),
+    ) as mock_add:
+        await async_write_meter_statistics(hass, stream, intervals, prior_sum=0.0)
+
+    metadata = mock_add.call_args.args[1]
+    assert metadata["unit_of_measurement"] == "m³"
+    assert metadata["unit_class"] == "volume"
 
 
 @pytest.mark.asyncio
