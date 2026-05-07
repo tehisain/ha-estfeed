@@ -1,5 +1,11 @@
 # Estfeed — Home Assistant Integration
 
+[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?logo=homeassistant&logoColor=white)](https://github.com/hacs/integration)
+[![Validate](https://img.shields.io/github/actions/workflow/status/tehisain/ha-estfeed/validate.yml?branch=main&label=validate&logo=github)](https://github.com/tehisain/ha-estfeed/actions/workflows/validate.yml)
+[![License: MIT](https://img.shields.io/github/license/tehisain/ha-estfeed?color=blue)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/tehisain/ha-estfeed?color=blueviolet)](https://github.com/tehisain/ha-estfeed/commits/main)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg?logo=ruff)](https://github.com/astral-sh/ruff)
+
 Home Assistant integration for Elering's [Estfeed](https://estfeed.elering.ee/) metering data API. Brings Estonian electricity (and gas) meter data into the **Energy Dashboard** with full historical backfill, plus lagging summary sensors for cards and automations.
 
 > **Note:** Estfeed data is settled overnight and arrives ~24 hours late. This integration is built around that — it is not real-time.
