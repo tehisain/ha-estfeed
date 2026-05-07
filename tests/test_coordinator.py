@@ -233,17 +233,16 @@ async def test_coordinator_clears_stale_error_on_success(hass):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_carries_prior_sum_across_chunks(hass):
-    """prior_sum must be tracked locally across chunks within a single fetch.
+async def test_coordinator_chains_prior_sum_across_chunks_on_regular_tick(hass):
+    """Regular tick (force_start=False) reads prior_sum once per stream and
+    chains the return value of async_write_meter_statistics across chunks.
 
     Re-reading get_last_statistics per chunk would race with HA's recorder
-    flush. The coordinator should read prior_sum once and advance it from the
-    return value of async_write_meter_statistics.
+    flush — short-term writes may not be visible yet, producing stale priors.
     """
     meter = _make_meter()
     client = MagicMock()
     client.list_metering_points = AsyncMock(return_value=[meter])
-    # Two chunks of 31 days each → triggers the multi-chunk loop.
     client.get_metering_data = AsyncMock(
         return_value=[
             MeterData(
@@ -261,13 +260,78 @@ async def test_coordinator_carries_prior_sum_across_chunks(hass):
     )
     coordinator.meters = [meter]
 
-    # Force a multi-chunk window: 70 days back → ~3 chunks of 31 days.
     start = datetime(2026, 1, 1, 0, tzinfo=UTC)
     end = datetime(2026, 3, 12, 0, tzinfo=UTC)
-    # async_write_meter_statistics returns running sum; simulate +12.0 per call.
-    write_returns = [12.0, 24.0, 36.0]
-    write_mock = AsyncMock(side_effect=write_returns * 4)  # plenty for both kinds
+    write_mock = AsyncMock(side_effect=[12.0, 24.0, 36.0] * 4)
     prior_mock = AsyncMock(return_value=5.0)
+    # No prior intervals so fetch_start = start (matches old test geometry).
+    latest_seen_mock = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.get_last_statistics",
+            new=MagicMock(return_value={}),
+        ),
+        patch.object(coordinator, "_prior_sum_for_stream", new=prior_mock),
+        patch.object(coordinator, "_latest_seen_for_stream", new=latest_seen_mock),
+        patch(
+            "custom_components.estfeed.coordinator.async_write_meter_statistics",
+            new=write_mock,
+        ),
+    ):
+        await coordinator._fetch_window(start, end, write_stats=True, force_start=False)
+
+    # _prior_sum_for_stream must be called exactly once per stream (2 streams),
+    # NOT once per chunk. Three chunks would otherwise multiply this.
+    assert prior_mock.call_count == 2
+    # First write per stream uses prior_sum=5.0 (the read-once value).
+    first_calls = write_mock.call_args_list[:2]
+    for call in first_calls:
+        assert call.kwargs["prior_sum"] == 5.0
+    # Subsequent writes for the same stream chain off the returned value (12.0),
+    # not a re-fetch from get_last_statistics.
+    third_call = write_mock.call_args_list[2]
+    assert third_call.kwargs["prior_sum"] == 12.0
+
+
+@pytest.mark.asyncio
+async def test_force_start_writes_reset_prior_sum_to_zero(hass):
+    """force_start=True (initial backfill, manual rebuild service) must rebuild
+    history from prior_sum=0, NOT chain off the current latest sum. Otherwise
+    historical buckets get offset by whatever the cumulative happens to be —
+    e.g., calling backfill_history while stats already exist would inflate
+    every backfilled hour by the current sum, producing visibly wrong totals
+    in the Energy dashboard.
+    """
+    meter = _make_meter()
+    client = MagicMock()
+    client.list_metering_points = AsyncMock(return_value=[meter])
+    client.get_metering_data = AsyncMock(
+        return_value=[
+            MeterData(
+                eic="38ZEE-00720089-N",
+                intervals=_hourly(datetime(2026, 1, 1, 0, tzinfo=UTC), 24),
+            )
+        ]
+    )
+
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={CONF_RESOLUTION: Resolution.HOUR.value, CONF_BACKFILL_MONTHS: 12},
+    )
+    coordinator.meters = [meter]
+
+    start = datetime(2026, 1, 1, 0, tzinfo=UTC)
+    end = datetime(2026, 3, 12, 0, tzinfo=UTC)
+    write_mock = AsyncMock(side_effect=[12.0, 24.0, 36.0] * 4)
+    # 999.0 simulates a stale prior cumulative — the bug would chain off this.
+    prior_mock = AsyncMock(return_value=999.0)
 
     with (
         patch(
@@ -286,17 +350,13 @@ async def test_coordinator_carries_prior_sum_across_chunks(hass):
     ):
         await coordinator._fetch_window(start, end, write_stats=True, force_start=True)
 
-    # _prior_sum_for_stream must be called exactly once per stream (2 streams),
-    # NOT once per chunk. Three chunks would otherwise multiply this.
-    assert prior_mock.call_count == 2
-    # First write per stream uses prior_sum=5.0 (the read-once value).
-    first_calls = write_mock.call_args_list[:2]
-    for call in first_calls:
-        assert call.kwargs["prior_sum"] == 5.0
-    # Subsequent writes for the same stream should chain off the returned value
-    # (12.0), not re-fetch from get_last_statistics.
-    third_call = write_mock.call_args_list[2]
-    assert third_call.kwargs["prior_sum"] == 12.0
+    # The expensive get_last_statistics read is skipped entirely on force_start.
+    assert prior_mock.call_count == 0
+    # First write per stream uses prior_sum=0.0 (clean rebuild).
+    for call in write_mock.call_args_list[:2]:
+        assert call.kwargs["prior_sum"] == 0.0
+    # Subsequent writes still chain via the returned running sum.
+    assert write_mock.call_args_list[2].kwargs["prior_sum"] == 12.0
 
 
 @pytest.mark.asyncio

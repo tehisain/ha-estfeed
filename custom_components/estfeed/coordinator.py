@@ -199,10 +199,16 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         # locally as we write. HA's recorder may not flush statistics writes
         # synchronously, so re-reading get_last_statistics inside the loop
         # would risk seeing stale data for chunk N+1 after chunk N's write.
+        # force_start callers (initial backfill, manual rebuild service) want
+        # to rebuild history from scratch — chaining off the current latest
+        # sum would offset every historical bucket by whatever the cumulative
+        # happens to be right now. Reset to 0.0 so the rewrite is clean.
         prior_sums: dict[str, float] = {}
         if write_stats:
             for stream in streams:
-                prior_sums[stream.statistic_id] = await self._prior_sum_for_stream(stream)
+                prior_sums[stream.statistic_id] = (
+                    0.0 if force_start else await self._prior_sum_for_stream(stream)
+                )
         cursor = fetch_start
         while cursor < end:
             chunk_end = min(cursor + timedelta(days=MAX_DAYS_PER_REQUEST), end)
