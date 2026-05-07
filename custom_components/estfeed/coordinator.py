@@ -279,10 +279,20 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         kind: Kind,
         intervals: list[AccountingInterval],
     ) -> None:
+        # Dedupe by period_start: backfill chunks can overlap with first_refresh's
+        # window (and with each other if the service is retriggered), so blind
+        # append would double-count the overlap when lagging-period sensors sum
+        # the bucket. Resort after extend because first_refresh seeds newer rows
+        # and backfill appends older chunks behind them — the trim below relies
+        # on the deque being ascending by period_start.
         bucket = self.cache[(eic, kind)]
-        for ival in sorted(intervals, key=lambda i: i.period_start):
-            bucket.append(ival)
-        # Trim entries older than ROLLING_CACHE_DAYS
+        existing_starts = {i.period_start for i in bucket}
+        new_intervals = [i for i in intervals if i.period_start not in existing_starts]
+        if new_intervals:
+            bucket.extend(new_intervals)
+            ordered = sorted(bucket, key=lambda i: i.period_start)
+            bucket.clear()
+            bucket.extend(ordered)
         cutoff = datetime.now(tz=UTC) - timedelta(days=ROLLING_CACHE_DAYS)
         while bucket and bucket[0].period_start < cutoff:
             bucket.popleft()

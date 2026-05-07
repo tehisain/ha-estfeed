@@ -371,10 +371,70 @@ async def test_cache_warmup_populates_rolling_cache(hass):
 
     cached = coordinator.cache[("38ZEE-00720089-N", Kind.CONSUMPTION)]
     # The mock returns the same intervals for every chunk; the warmup window is split
-    # into 31-day chunks so the cache gets called multiple times. We don't assert an
-    # exact count — only that the cache was populated for both kinds.
-    assert len(cached) > 0
-    assert len(coordinator.cache[("38ZEE-00720089-N", Kind.PRODUCTION)]) > 0
+    # into 31-day chunks so the cache gets called multiple times. _update_cache must
+    # dedupe, so the bucket holds at most the unique intervals once.
+    assert 0 < len(cached) <= len(intervals)
+    assert len(coordinator.cache[("38ZEE-00720089-N", Kind.PRODUCTION)]) <= len(intervals)
+
+
+def test_update_cache_dedupes_overlapping_writes(hass):
+    """Regression: backfill chunks overlap with first_refresh's window. Without
+    dedup the bucket double-counts the overlap and lagging-period sensors
+    inflate (observed: 620 kWh for a month whose true total was 228 kWh)."""
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=MagicMock(),
+        slug="home",
+        options={},
+    )
+    eic = "38ZEE-00720089-N"
+    base = datetime(2026, 4, 7, 11, tzinfo=UTC)  # mimics first_refresh start
+    first_refresh_data = _hourly(base, 24 * 30)  # 30 days, Apr 7 - May 7
+    coordinator._update_cache(eic, Kind.CONSUMPTION, first_refresh_data)
+    assert len(coordinator.cache[(eic, Kind.CONSUMPTION)]) == 24 * 30
+
+    # Backfill chunk overlapping the start of first_refresh's window: Apr 1 - Apr 18.
+    # Apr 7 - Apr 18 overlaps; only Apr 1 - Apr 7 (144 hours) is genuinely new.
+    overlap_start = datetime(2026, 4, 1, 0, tzinfo=UTC)
+    backfill_chunk = _hourly(overlap_start, 24 * 17)
+    coordinator._update_cache(eic, Kind.CONSUMPTION, backfill_chunk)
+
+    bucket = coordinator.cache[(eic, Kind.CONSUMPTION)]
+    starts = [i.period_start for i in bucket]
+    # No duplicates — bucket holds each unique period_start at most once.
+    assert len(starts) == len(set(starts))
+    # Bucket is sorted ascending so the trim-from-left loop works.
+    assert starts == sorted(starts)
+    # 720 (first write) + 408 (second write) - 253 overlap = 875 unique hours.
+    assert len(bucket) == 875
+
+
+def test_update_cache_trim_works_after_unsorted_appends(hass):
+    """Regression: the trim loop only pops while bucket[0] is older than the
+    62-day cutoff. If older intervals are appended behind newer ones (as
+    backfill does after first_refresh seeded the bucket) the bucket becomes
+    unsorted and the trim silently leaves stale data behind. _update_cache
+    must resort before trimming."""
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=MagicMock(),
+        slug="home",
+        options={},
+    )
+    eic = "38ZEE-00720089-N"
+    now = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0)
+    # First write: a recent slice that the trim should keep.
+    recent = _hourly(now - timedelta(days=10), 24)
+    coordinator._update_cache(eic, Kind.CONSUMPTION, recent)
+    # Second write: very old data, far older than ROLLING_CACHE_DAYS=62.
+    stale = _hourly(now - timedelta(days=200), 24)
+    coordinator._update_cache(eic, Kind.CONSUMPTION, stale)
+
+    bucket = coordinator.cache[(eic, Kind.CONSUMPTION)]
+    # All stale (>62d) intervals must be gone; only the recent slice remains.
+    assert len(bucket) == 24
+    cutoff = datetime.now(tz=UTC) - timedelta(days=62)
+    assert all(i.period_start >= cutoff for i in bucket)
 
 
 @pytest.mark.asyncio
