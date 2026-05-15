@@ -130,6 +130,12 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         # 12 months ≈ 365 days; backfill_months * 30 keeps things simple and bounded.
         start = end - timedelta(days=self.backfill_months * 30)
         await self._fetch_window(start, end, write_stats=True, force_start=True)
+        # Lagging sensors compute from the cache, not from coordinator.data. Fetch
+        # paths that bypass _async_update_data (this method and async_warm_cache,
+        # plus the backfill_history service) populate the cache without notifying
+        # CoordinatorEntity listeners, so the sensor state stays frozen at the
+        # value computed before the background fill finished. Nudge listeners.
+        self.async_update_listeners()
 
     async def async_warm_cache(self) -> None:
         """Populate the rolling 62-day cache after a restart.
@@ -141,6 +147,7 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         end = datetime.now(tz=UTC)
         start = end - timedelta(days=ROLLING_CACHE_DAYS)
         await self._fetch_window(start, end, write_stats=False, force_start=True)
+        self.async_update_listeners()
 
     async def _fetch_window(
         self,
