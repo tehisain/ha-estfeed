@@ -437,6 +437,76 @@ async def test_cache_warmup_populates_rolling_cache(hass):
     assert len(coordinator.cache[("38ZEE-00720089-N", Kind.PRODUCTION)]) <= len(intervals)
 
 
+@pytest.mark.asyncio
+async def test_warm_cache_notifies_listeners(hass):
+    """Regression: lagging sensors compute from the cache, so warm_cache and
+    initial_backfill must push to coordinator listeners after the background
+    fill completes. Without this, CoordinatorEntity state stays frozen at
+    whatever value was computed against the half-populated cache during
+    first_refresh and never picks up the historical data."""
+    client = MagicMock()
+    client.list_metering_points = AsyncMock(return_value=[_make_meter()])
+    client.get_metering_data = AsyncMock(
+        return_value=[MeterData(eic="38ZEE-00720089-N", intervals=[])]
+    )
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={CONF_RESOLUTION: Resolution.HOUR.value, CONF_BACKFILL_MONTHS: 12},
+    )
+    coordinator.meters = [_make_meter()]
+    listener = MagicMock()
+    coordinator.async_add_listener(listener)
+    with (
+        patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.get_last_statistics",
+            new=MagicMock(return_value={}),
+        ),
+    ):
+        await coordinator.async_warm_cache()
+    listener.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_initial_backfill_notifies_listeners(hass):
+    """Same regression as warm_cache, applied to the initial-install path."""
+    client = MagicMock()
+    client.list_metering_points = AsyncMock(return_value=[_make_meter()])
+    client.get_metering_data = AsyncMock(
+        return_value=[MeterData(eic="38ZEE-00720089-N", intervals=[])]
+    )
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={CONF_RESOLUTION: Resolution.HOUR.value, CONF_BACKFILL_MONTHS: 12},
+    )
+    coordinator.meters = [_make_meter()]
+    listener = MagicMock()
+    coordinator.async_add_listener(listener)
+    with (
+        patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.get_last_statistics",
+            new=MagicMock(return_value={}),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.async_write_meter_statistics",
+            new=AsyncMock(),
+        ),
+    ):
+        await coordinator.async_initial_backfill()
+    listener.assert_called()
+
+
 def test_update_cache_dedupes_overlapping_writes(hass):
     """Regression: backfill chunks overlap with first_refresh's window. Without
     dedup the bucket double-counts the overlap and lagging-period sensors
