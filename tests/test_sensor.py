@@ -33,6 +33,13 @@ def _ival(period_start: datetime, kwh: float) -> AccountingInterval:
     )
 
 
+def test_window_today_in_local_tz():
+    now = datetime(2026, 4, 29, 12, 30, tzinfo=TALLINN)
+    start, end = window_for_period(LaggingPeriod.TODAY, now=now, tz=TALLINN)
+    assert start == datetime(2026, 4, 29, 0, tzinfo=TALLINN)
+    assert end == now
+
+
 def test_window_yesterday_in_local_tz():
     now = datetime(2026, 4, 29, 12, tzinfo=TALLINN)
     start, end = window_for_period(LaggingPeriod.YESTERDAY, now=now, tz=TALLINN)
@@ -59,6 +66,23 @@ def test_window_previous_month_january_rolls_to_december():
     start, end = window_for_period(LaggingPeriod.PREVIOUS_MONTH, now=now, tz=TALLINN)
     assert start == datetime(2025, 12, 1, 0, tzinfo=TALLINN)
     assert end == datetime(2026, 1, 1, 0, tzinfo=TALLINN)
+
+
+def test_sum_for_period_today_partial_window():
+    """TODAY should sum only the hours that have already elapsed today, not the
+    full 24h. The window end is `now`, not midnight, so a meter that hasn't
+    reported the rest of today yet still gives a sensible running total."""
+    intervals = [_ival(datetime(2026, 4, 28, 21, tzinfo=UTC), 0.5)] + [
+        _ival(datetime(2026, 4, 29, h, tzinfo=UTC), 1.0) for h in range(6)
+    ]
+    # 12:30 local = 09:30 UTC. Hours 0..5 UTC = 03:00..08:00 local — all today.
+    now = datetime(2026, 4, 29, 12, 30, tzinfo=TALLINN)
+    total = sum_for_period(
+        intervals, Kind.CONSUMPTION, LaggingPeriod.TODAY, now=now, tz=TALLINN
+    )
+    # Today in Tallinn = 2026-04-29 local = 2026-04-28 21:00Z .. 09:30Z today.
+    # That includes the 0.5 sample at 21:00Z + six 1.0 samples at 00..05Z.
+    assert total == pytest.approx(6.5)
 
 
 def test_sum_for_period_yesterday():

@@ -39,9 +39,11 @@
   },
   "entity": {
     "sensor": {
+      "consumption_today": { "name": "Consumption today" },
       "consumption_yesterday": { "name": "Consumption yesterday" },
       "consumption_month_to_date": { "name": "Consumption month-to-date" },
       "consumption_previous_month": { "name": "Consumption previous month" },
+      "production_today": { "name": "Production today" },
       "production_yesterday": { "name": "Production yesterday" },
       "production_month_to_date": { "name": "Production month-to-date" },
       "production_previous_month": { "name": "Production previous month" },

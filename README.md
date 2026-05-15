@@ -33,10 +33,11 @@ After setup completes (and the backfill finishes — usually within 1–2 minute
 ## Entities created
 
 For each metering point:
+- `sensor.<name>_consumption_today` (kWh — partial day, grows as new hourly intervals arrive ~24h after they happen)
 - `sensor.<name>_consumption_yesterday` (kWh)
 - `sensor.<name>_consumption_month_to_date` (kWh)
 - `sensor.<name>_consumption_previous_month` (kWh)
-- `sensor.<name>_production_yesterday` / `_month_to_date` / `_previous_month` (kWh, **disabled by default** — enable in entity registry if you generate)
+- `sensor.<name>_production_today` / `_yesterday` / `_month_to_date` / `_previous_month` (kWh, **disabled by default** — enable in entity registry if you generate)
 - `sensor.<name>_latest_interval` (timestamp, diagnostic)
 - `binary_sensor.<name>_data_fresh` (diagnostic — `on` if newest interval is < 30 h old)
 

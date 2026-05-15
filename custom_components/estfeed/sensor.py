@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 
 class LaggingPeriod(StrEnum):
+    TODAY = "today"
     YESTERDAY = "yesterday"
     MONTH_TO_DATE = "month_to_date"
     PREVIOUS_MONTH = "previous_month"
@@ -36,6 +37,8 @@ def window_for_period(
     """Return [start, end) for the given period in the given tz."""
     local_now = now.astimezone(tz)
     today_local = datetime(local_now.year, local_now.month, local_now.day, tzinfo=tz)
+    if period == LaggingPeriod.TODAY:
+        return today_local, local_now
     if period == LaggingPeriod.YESTERDAY:
         return today_local - timedelta(days=1), today_local
     if period == LaggingPeriod.MONTH_TO_DATE:

@@ -39,9 +39,11 @@
   },
   "entity": {
     "sensor": {
+      "consumption_today": { "name": "Tänane tarbimine" },
       "consumption_yesterday": { "name": "Eilne tarbimine" },
       "consumption_month_to_date": { "name": "Tarbimine sel kuul" },
       "consumption_previous_month": { "name": "Eelmise kuu tarbimine" },
+      "production_today": { "name": "Tänane tootmine" },
       "production_yesterday": { "name": "Eilne tootmine" },
       "production_month_to_date": { "name": "Tootmine sel kuul" },
       "production_previous_month": { "name": "Eelmise kuu tootmine" },
