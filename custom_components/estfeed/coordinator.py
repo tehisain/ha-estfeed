@@ -292,20 +292,22 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         kind: Kind,
         intervals: list[AccountingInterval],
     ) -> None:
-        # Dedupe by period_start: backfill chunks can overlap with first_refresh's
-        # window (and with each other if the service is retriggered), so blind
-        # append would double-count the overlap when lagging-period sensors sum
-        # the bucket. Resort after extend because first_refresh seeds newer rows
-        # and backfill appends older chunks behind them — the trim below relies
-        # on the deque being ascending by period_start.
+        # Newer fetch wins per period_start. Estfeed returns recent intervals
+        # with `consumption_kwh=None` while the hour is still being settled, and
+        # later fetches replace the null with the real value. A period_start-only
+        # dedup that *skips* duplicates would freeze the original null and the
+        # lagging sensors would silently lose hours as today→yesterday rolls
+        # over (observed live: today=0.374 / yesterday=6.383 while recorder
+        # stats had the same window at 11.5 kWh). Resort after replace because
+        # backfill chunks can land older rows behind newer ones — the trim
+        # below relies on the deque being ascending by period_start.
         bucket = self.cache[(eic, kind)]
-        existing_starts = {i.period_start for i in bucket}
-        new_intervals = [i for i in intervals if i.period_start not in existing_starts]
-        if new_intervals:
-            bucket.extend(new_intervals)
-            ordered = sorted(bucket, key=lambda i: i.period_start)
-            bucket.clear()
-            bucket.extend(ordered)
+        by_start: dict[datetime, AccountingInterval] = {i.period_start: i for i in bucket}
+        for i in intervals:
+            by_start[i.period_start] = i
+        ordered = sorted(by_start.values(), key=lambda i: i.period_start)
+        bucket.clear()
+        bucket.extend(ordered)
         cutoff = datetime.now(tz=UTC) - timedelta(days=ROLLING_CACHE_DAYS)
         while bucket and bucket[0].period_start < cutoff:
             bucket.popleft()

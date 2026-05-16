@@ -539,6 +539,48 @@ def test_update_cache_dedupes_overlapping_writes(hass):
     assert len(bucket) == 875
 
 
+def test_update_cache_replaces_null_with_later_value(hass):
+    """Regression: Estfeed returns recent intervals with consumption_kwh=None
+    while the hour is still being settled (the API surfaces the row before the
+    value lands). A later fetch returns the same period_start with a real
+    value. The cache must adopt the newer non-null value, not keep the stale
+    null — otherwise today/yesterday sums silently lose hours as they age.
+    Observed live as today=0.374 / yesterday=6.383 while recorder stats had
+    the same hours at ~0.4 kWh each totalling 11.5 kWh.
+    """
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=MagicMock(),
+        slug="home",
+        options={},
+    )
+    eic = "38ZEE-00720089-N"
+    t = datetime(2026, 5, 16, 0, tzinfo=UTC)
+    null_first = [
+        AccountingInterval(
+            period_start=t,
+            consumption_kwh=None,
+            production_kwh=None,
+            consumption_m3=None,
+            production_m3=None,
+        )
+    ]
+    valued_later = [
+        AccountingInterval(
+            period_start=t,
+            consumption_kwh=0.42,
+            production_kwh=None,
+            consumption_m3=None,
+            production_m3=None,
+        )
+    ]
+    coordinator._update_cache(eic, Kind.CONSUMPTION, null_first)
+    coordinator._update_cache(eic, Kind.CONSUMPTION, valued_later)
+    bucket = coordinator.cache[(eic, Kind.CONSUMPTION)]
+    assert len(bucket) == 1
+    assert bucket[0].consumption_kwh == 0.42
+
+
 def test_update_cache_trim_works_after_unsorted_appends(hass):
     """Regression: the trim loop only pops while bucket[0] is older than the
     62-day cutoff. If older intervals are appended behind newer ones (as
