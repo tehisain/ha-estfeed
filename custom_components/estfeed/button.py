@@ -32,9 +32,7 @@ class CumulativeResetButton(ButtonEntity):
         self._meter = meter
         self._kind = kind
         suffix = eic_suffix(meter.eic)
-        self._attr_unique_id = (
-            f"{DOMAIN}_{coordinator.slug}_{kind.value}_cumulative_reset_{suffix}"
-        )
+        self._attr_unique_id = f"{DOMAIN}_{coordinator.slug}_{kind.value}_cumulative_reset_{suffix}"
         self._attr_translation_key = f"{kind.value}_cumulative_reset"
         # Production reset mirrors the production cumulative sensor: disabled
         # by default for users who don't generate.

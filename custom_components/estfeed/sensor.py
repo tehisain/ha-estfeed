@@ -180,9 +180,7 @@ class CumulativeSinceResetSensor(_EstfeedEntity, SensorEntity):
         super().__init__(coordinator, meter)
         self._kind = kind
         suffix = eic_suffix(meter.eic)
-        self._attr_unique_id = (
-            f"{DOMAIN}_{coordinator.slug}_{kind.value}_cumulative_{suffix}"
-        )
+        self._attr_unique_id = f"{DOMAIN}_{coordinator.slug}_{kind.value}_cumulative_{suffix}"
         self._attr_translation_key = f"{kind.value}_cumulative"
         self._attr_device_class = SensorDeviceClass.ENERGY
         if meter.commodity_type == CommodityType.ELECTRICITY:

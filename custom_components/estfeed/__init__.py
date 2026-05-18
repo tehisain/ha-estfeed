@@ -71,9 +71,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass=hass, client=client, slug=slug, options={**entry.data, **entry.options}
     )
     coordinator.meters = meters
-    coordinator._store = Store(  # noqa: SLF001 — coordinator API is internal to the integration
-        hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.baselines"
-    )
+    coordinator.attach_store(Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.baselines"))
     await coordinator.async_load_baselines()
 
     needs_backfill = True

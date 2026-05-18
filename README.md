@@ -8,7 +8,7 @@
 
 Home Assistant integration for Elering's [Estfeed](https://estfeed.elering.ee/) metering data API. Brings Estonian electricity (and gas) meter data into the **Energy Dashboard** with full historical backfill, plus lagging summary sensors for cards and automations.
 
-> **Note:** Estfeed data is settled overnight and arrives ~24 hours late. This integration is built around that — it is not real-time.
+> **Note:** Estfeed publishes intervals throughout the day, but each hour goes through a settling period before the kWh value is finalised — the integration polls hourly and replaces unsettled placeholders with real values once the grid operator confirms them. Most hours land within a few hours of midnight that closed them; some may take longer. Expect today's running total to grow in chunks rather than minute-by-minute, and don't treat it as real-time.
 
 ## Installation
 
@@ -30,16 +30,20 @@ You'll need a `client_id` and `client_secret` from your e-Elering customer porta
 
 After setup completes (and the backfill finishes — usually within 1–2 minutes), open Settings → Energy → Electricity grid → "Add consumption" and pick `estfeed:<your_name>_consumption_<eic_suffix>`. If you have solar, add the matching `_production_` stream as "Return to grid".
 
+The integration writes external statistics with proper cumulative-sum semantics and a `last_reset` attribute on the cumulative-since-reset sensor, so HA's Energy dashboard handles resets without flagging them as counter rollbacks.
+
 ## Entities created
 
 For each metering point:
-- `sensor.<name>_consumption_today` (kWh — partial day, grows as new hourly intervals arrive ~24h after they happen)
+- `sensor.<name>_consumption_today` (kWh — running total for the current local day; grows as new hourly intervals settle)
 - `sensor.<name>_consumption_yesterday` (kWh)
 - `sensor.<name>_consumption_month_to_date` (kWh)
 - `sensor.<name>_consumption_previous_month` (kWh)
-- `sensor.<name>_production_today` / `_yesterday` / `_month_to_date` / `_previous_month` (kWh, **disabled by default** — enable in entity registry if you generate)
+- `sensor.<name>_consumption_cumulative` (kWh — total since the last reset; baseline is captured at install so the sensor starts at 0 and counts forward)
+- `sensor.<name>_production_today` / `_yesterday` / `_month_to_date` / `_previous_month` / `_cumulative` (kWh, **disabled by default** — enable in entity registry if you generate)
 - `sensor.<name>_latest_interval` (timestamp, diagnostic)
 - `binary_sensor.<name>_data_fresh` (diagnostic — `on` if newest interval is < 30 h old)
+- `button.<name>_consumption_cumulative_reset` (re-captures the current cumulative as the new baseline, so the cumulative sensor returns to 0; the matching production button exists too and is disabled by default)
 
 ## Services
 
@@ -47,7 +51,7 @@ For each metering point:
 
 ## Limitations
 
-- Data is delayed ~24 hours.
+- Not real-time: hours need to settle before their kWh value is final (see the note at the top).
 - Cost calculation is intentionally not included; use HA's built-in Energy Dashboard cost configuration with a price entity.
 - API rate limit: 1 request per 5 seconds (per API key) — handled internally.
 

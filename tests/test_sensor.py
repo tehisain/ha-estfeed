@@ -79,9 +79,7 @@ def test_sum_for_period_today_partial_window():
     ]
     # 12:30 local = 09:30 UTC. Hours 0..5 UTC = 03:00..08:00 local — all today.
     now = datetime(2026, 4, 29, 12, 30, tzinfo=TALLINN)
-    total = sum_for_period(
-        intervals, Kind.CONSUMPTION, LaggingPeriod.TODAY, now=now, tz=TALLINN
-    )
+    total = sum_for_period(intervals, Kind.CONSUMPTION, LaggingPeriod.TODAY, now=now, tz=TALLINN)
     # Today in Tallinn = 2026-04-29 local = 2026-04-28 21:00Z .. 09:30Z today.
     # That includes the 0.5 sample at 21:00Z + six 1.0 samples at 00..05Z.
     assert total == pytest.approx(6.5)

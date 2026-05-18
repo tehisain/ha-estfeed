@@ -50,6 +50,7 @@ class CumulativeBaseline:
     sum: float
     reset_at: datetime
 
+
 _LOGGER = logging.getLogger(__name__)
 
 # Kind / unit mapping for electricity vs gas
@@ -98,7 +99,15 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         # the optional ``_store`` so they survive HA restarts.
         self.latest_sum: dict[tuple[str, Kind], float] = {}
         self.baselines: dict[tuple[str, Kind], CumulativeBaseline] = {}
-        self._store: Store | None = None
+        self._store: Store[dict[str, Any]] | None = None
+
+    def attach_store(self, store: Store[dict[str, Any]]) -> None:
+        """Attach the HA storage helper used to persist cumulative baselines.
+
+        Kept off the constructor so tests can spin up a coordinator without
+        touching HA's storage subsystem.
+        """
+        self._store = store
 
     @property
     def resolution(self) -> Resolution:
