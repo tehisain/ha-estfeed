@@ -12,7 +12,9 @@ from homeassistant.const import UnitOfEnergy
 
 from custom_components.estfeed.api import AccountingInterval, MeteringPoint, Period
 from custom_components.estfeed.const import CommodityType, Kind
+from custom_components.estfeed.coordinator import CumulativeBaseline
 from custom_components.estfeed.sensor import (
+    CumulativeSinceResetSensor,
     LaggingPeriod,
     LaggingSensor,
     LatestIntervalSensor,
@@ -168,6 +170,53 @@ def test_lagging_sensor_unavailable_when_cache_empty():
         multi_meter=False,
     )
     assert sensor.available is False
+
+
+def test_cumulative_sensor_subtracts_baseline_from_latest_sum():
+    coordinator = MagicMock()
+    coordinator.latest_sum = {("38ZEE-00720089-N", Kind.CONSUMPTION): 250.0}
+    coordinator.baselines = {
+        ("38ZEE-00720089-N", Kind.CONSUMPTION): CumulativeBaseline(
+            sum=100.0, reset_at=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    }
+    coordinator.slug = "home"
+
+    sensor = CumulativeSinceResetSensor(coordinator, _meter(), Kind.CONSUMPTION)
+
+    assert sensor.available is True
+    assert sensor.native_value == 150.0
+    assert sensor.last_reset == datetime(2026, 1, 1, tzinfo=UTC)
+    assert sensor.unique_id == "estfeed_home_consumption_cumulative_089n"
+
+
+def test_cumulative_sensor_unavailable_before_first_refresh():
+    """No latest_sum and no baseline → sensor is unavailable. This is the
+    state during initial setup before the first fetch completes."""
+    coordinator = MagicMock()
+    coordinator.latest_sum = {}
+    coordinator.baselines = {}
+    coordinator.slug = "home"
+
+    sensor = CumulativeSinceResetSensor(coordinator, _meter(), Kind.CONSUMPTION)
+    assert sensor.available is False
+    assert sensor.native_value is None
+    assert sensor.last_reset is None
+
+
+def test_cumulative_sensor_reads_zero_immediately_after_reset():
+    """Right after the user presses reset, the baseline equals latest_sum;
+    the sensor must read exactly 0 until the next interval lands."""
+    coordinator = MagicMock()
+    key = ("38ZEE-00720089-N", Kind.CONSUMPTION)
+    coordinator.latest_sum = {key: 1234.5}
+    coordinator.baselines = {
+        key: CumulativeBaseline(sum=1234.5, reset_at=datetime(2026, 5, 18, tzinfo=UTC))
+    }
+    coordinator.slug = "home"
+
+    sensor = CumulativeSinceResetSensor(coordinator, _meter(), Kind.CONSUMPTION)
+    assert sensor.native_value == 0.0
 
 
 def test_latest_interval_sensor_returns_max_period_start():

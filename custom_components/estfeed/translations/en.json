@@ -47,10 +47,16 @@
       "production_yesterday": { "name": "Production yesterday" },
       "production_month_to_date": { "name": "Production month-to-date" },
       "production_previous_month": { "name": "Production previous month" },
+      "consumption_cumulative": { "name": "Cumulative consumption" },
+      "production_cumulative": { "name": "Cumulative production" },
       "latest_interval": { "name": "Latest interval" }
     },
     "binary_sensor": {
       "data_fresh": { "name": "Data fresh" }
+    },
+    "button": {
+      "consumption_cumulative_reset": { "name": "Reset cumulative consumption" },
+      "production_cumulative_reset": { "name": "Reset cumulative production" }
     }
   },
   "services": {

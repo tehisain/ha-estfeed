@@ -20,7 +20,7 @@ from custom_components.estfeed.const import (
     Kind,
     Resolution,
 )
-from custom_components.estfeed.coordinator import EstfeedCoordinator
+from custom_components.estfeed.coordinator import CumulativeBaseline, EstfeedCoordinator
 
 
 def _make_meter(eic: str = "38ZEE-00720089-N") -> MeteringPoint:
@@ -904,3 +904,107 @@ async def test_coordinator_snaps_request_start_to_top_of_hour(hass):
         assert start.minute == 0 and start.second == 0 and start.microsecond == 0, (
             f"non-aligned start {start!r}"
         )
+
+
+@pytest.mark.asyncio
+async def test_ensure_baselines_captures_initial_baseline(hass):
+    """First refresh after install: every (eic, kind) with a real cumulative
+    sum should get a baseline equal to that sum. The cumulative-since-reset
+    sensor reads 0 immediately afterwards, then grows from there — matches
+    the user's "counts from install" design choice."""
+    coordinator = EstfeedCoordinator(
+        hass=hass, client=MagicMock(), slug="home", options={}
+    )
+    coordinator.meters = [_make_meter()]
+    coordinator.latest_sum = {
+        ("38ZEE-00720089-N", Kind.CONSUMPTION): 1234.5,
+        ("38ZEE-00720089-N", Kind.PRODUCTION): 0.0,
+    }
+    await coordinator.async_ensure_baselines()
+
+    assert (
+        coordinator.baselines[("38ZEE-00720089-N", Kind.CONSUMPTION)].sum == 1234.5
+    )
+    # Production stream with a legitimate 0.0 sum still gets a baseline —
+    # otherwise the entity stays unavailable forever for non-generating meters.
+    assert coordinator.baselines[("38ZEE-00720089-N", Kind.PRODUCTION)].sum == 0.0
+
+
+@pytest.mark.asyncio
+async def test_ensure_baselines_does_not_overwrite_existing(hass):
+    """Once a baseline is captured (initial install or user reset), later
+    refresh cycles must leave it alone — otherwise every poll would zero
+    out the cumulative sensor."""
+    coordinator = EstfeedCoordinator(
+        hass=hass, client=MagicMock(), slug="home", options={}
+    )
+    coordinator.meters = [_make_meter()]
+    key = ("38ZEE-00720089-N", Kind.CONSUMPTION)
+    original = CumulativeBaseline(sum=100.0, reset_at=datetime(2026, 1, 1, tzinfo=UTC))
+    coordinator.baselines[key] = original
+    coordinator.latest_sum[key] = 250.0
+
+    await coordinator.async_ensure_baselines()
+
+    assert coordinator.baselines[key] is original
+
+
+@pytest.mark.asyncio
+async def test_async_reset_cumulative_captures_current_sum(hass):
+    coordinator = EstfeedCoordinator(
+        hass=hass, client=MagicMock(), slug="home", options={}
+    )
+    coordinator.meters = [_make_meter()]
+    key = ("38ZEE-00720089-N", Kind.CONSUMPTION)
+    # Pretend the install-time baseline captured 100; now the cumulative has
+    # grown to 250 and the user presses reset.
+    coordinator.latest_sum[key] = 250.0
+    coordinator.baselines[key] = CumulativeBaseline(
+        sum=100.0, reset_at=datetime(2026, 1, 1, tzinfo=UTC)
+    )
+
+    await coordinator.async_reset_cumulative("38ZEE-00720089-N", Kind.CONSUMPTION)
+
+    # Baseline jumps to the current cumulative; sensor reads 0 next refresh.
+    assert coordinator.baselines[key].sum == 250.0
+    # reset_at is now-ish (datetime.now in the method) — just check it's UTC.
+    assert coordinator.baselines[key].reset_at.tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_async_reset_cumulative_noop_without_stats(hass):
+    """Resetting before any statistics exist must NOT capture a zero baseline —
+    otherwise the next refresh anchors the sensor at the install-time
+    cumulative (which could be large) and the user sees a counter jump."""
+    coordinator = EstfeedCoordinator(
+        hass=hass, client=MagicMock(), slug="home", options={}
+    )
+    coordinator.meters = [_make_meter()]
+
+    await coordinator.async_reset_cumulative("38ZEE-00720089-N", Kind.CONSUMPTION)
+
+    assert ("38ZEE-00720089-N", Kind.CONSUMPTION) not in coordinator.baselines
+
+
+@pytest.mark.asyncio
+async def test_refresh_latest_sums_skips_streams_without_rows(hass):
+    """A meter+kind with no statistics rows yet should NOT be added to
+    latest_sum — keeping it absent is what makes the cumulative sensor
+    report unavailable instead of zero before backfill completes."""
+    coordinator = EstfeedCoordinator(
+        hass=hass, client=MagicMock(), slug="home", options={}
+    )
+    coordinator.meters = [_make_meter()]
+
+    # No rows for any stream → method returns None for both consumption and
+    # production, so latest_sum stays empty.
+    with patch(
+        "custom_components.estfeed.coordinator.get_instance",
+        return_value=_fake_recorder(),
+    ), patch(
+        "custom_components.estfeed.coordinator.get_last_statistics",
+        new=MagicMock(return_value={}),
+    ):
+        await coordinator.async_refresh_latest_sums()
+
+    assert coordinator.latest_sum == {}

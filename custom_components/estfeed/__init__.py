@@ -15,6 +15,7 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.recorder import get_instance
+from homeassistant.helpers.storage import Store
 
 from .api import EstfeedClient, EstfeedError
 from .const import (
@@ -30,7 +31,9 @@ from .coordinator import EstfeedCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
+
+STORAGE_VERSION = 1
 
 SERVICE_BACKFILL = "backfill_history"
 SERVICE_BACKFILL_SCHEMA = vol.Schema(
@@ -68,6 +71,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass=hass, client=client, slug=slug, options={**entry.data, **entry.options}
     )
     coordinator.meters = meters
+    coordinator._store = Store(  # noqa: SLF001 — coordinator API is internal to the integration
+        hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.baselines"
+    )
+    await coordinator.async_load_baselines()
 
     needs_backfill = True
     recorder = get_instance(hass)

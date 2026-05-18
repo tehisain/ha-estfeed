@@ -7,7 +7,11 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory, UnitOfEnergy
 from homeassistant.core import HomeAssistant
@@ -155,6 +159,74 @@ class LaggingSensor(_EstfeedEntity, SensorEntity):
         }
 
 
+class CumulativeSinceResetSensor(_EstfeedEntity, SensorEntity):
+    """Monotonically-increasing total since the last reset.
+
+    Backed by the recorder's external statistics ``sum`` field (always full
+    history, not the 62-day in-memory cache) minus a baseline captured at
+    install time or on reset-button press. Surfaces ``last_reset`` so HA's
+    Energy dashboard accepts the value dropping back to zero after a reset
+    rather than flagging it as a counter rollback.
+    """
+
+    _attr_state_class = SensorStateClass.TOTAL
+
+    def __init__(
+        self,
+        coordinator: EstfeedCoordinator,
+        meter: MeteringPoint,
+        kind: Kind,
+    ) -> None:
+        super().__init__(coordinator, meter)
+        self._kind = kind
+        suffix = eic_suffix(meter.eic)
+        self._attr_unique_id = (
+            f"{DOMAIN}_{coordinator.slug}_{kind.value}_cumulative_{suffix}"
+        )
+        self._attr_translation_key = f"{kind.value}_cumulative"
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        if meter.commodity_type == CommodityType.ELECTRICITY:
+            self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        else:
+            self._attr_device_class = SensorDeviceClass.GAS
+            self._attr_native_unit_of_measurement = "m³"
+        if kind == Kind.PRODUCTION:
+            self._attr_entity_registry_enabled_default = False
+
+    @property
+    def _key(self) -> tuple[str, Kind]:
+        return (self._meter.eic, self._kind)
+
+    @property
+    def available(self) -> bool:
+        key = self._key
+        return key in self.coordinator.latest_sum and key in self.coordinator.baselines
+
+    @property
+    def native_value(self) -> float | None:
+        key = self._key
+        latest = self.coordinator.latest_sum.get(key)
+        baseline = self.coordinator.baselines.get(key)
+        if latest is None or baseline is None:
+            return None
+        return round(latest - baseline.sum, 3)
+
+    @property
+    def last_reset(self) -> datetime | None:
+        baseline = self.coordinator.baselines.get(self._key)
+        return baseline.reset_at if baseline else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str]:
+        baseline = self.coordinator.baselines.get(self._key)
+        return {
+            "meter_eic": self._meter.eic,
+            "commodity_type": self._meter.commodity_type.value,
+            "baseline_sum": f"{baseline.sum:.3f}" if baseline else "",
+            "reset_at": baseline.reset_at.isoformat() if baseline else "",
+        }
+
+
 class LatestIntervalSensor(_EstfeedEntity, SensorEntity):
     """Diagnostic: timestamp of the newest cached interval."""
 
@@ -191,5 +263,6 @@ async def async_setup_entry(
         for kind in (Kind.CONSUMPTION, Kind.PRODUCTION):
             for period in LaggingPeriod:
                 entities.append(LaggingSensor(coordinator, meter, kind, period, multi_meter))
+            entities.append(CumulativeSinceResetSensor(coordinator, meter, kind))
         entities.append(LatestIntervalSensor(coordinator, meter))
     async_add_entities(entities)
