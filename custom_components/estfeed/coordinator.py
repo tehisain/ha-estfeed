@@ -40,18 +40,38 @@ from .statistics import (
 
 @dataclass(frozen=True, slots=True)
 class CumulativeBaseline:
-    """Recorded cumulative-sum value at the moment the user pressed reset.
+    """Anchor timestamp for the cumulative-since-reset sensor.
 
-    The cumulative-since-reset sensor reports ``latest_sum - baseline.sum``.
-    ``reset_at`` is surfaced as the HA ``last_reset`` attribute so the Energy
-    dashboard handles the reset gracefully when the value drops back to zero.
+    The sensor sums raw cache intervals whose ``period_start`` is at or after
+    ``reset_at``. Computing from raw intervals rather than the recorder's
+    cumulative ``sum`` column shields us from historical sum-column
+    corruption (e.g., a force_start backfill that chained off an already-
+    inflated prior_sum and pushed the running total up by thousands of kWh).
+
+    ``frozen_sum`` accumulates consumption for intervals that have aged out
+    of the 62-day rolling cache, so a long-running baseline reports
+    ``frozen_sum + sum(cache slice)`` and stays correct past the cache window.
+    ``reset_at`` is surfaced as HA's ``last_reset`` attribute so the Energy
+    dashboard tolerates the reset without flagging it as a counter rollback.
     """
 
-    sum: float
     reset_at: datetime
+    frozen_sum: float = 0.0
 
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _interval_value(interval: AccountingInterval, kind: Kind) -> float | None:
+    """Return the kWh/m³ value for a kind, falling back across units."""
+    if kind == Kind.CONSUMPTION:
+        if interval.consumption_kwh is not None:
+            return interval.consumption_kwh
+        return interval.consumption_m3
+    if interval.production_kwh is not None:
+        return interval.production_kwh
+    return interval.production_m3
+
 
 # Kind / unit mapping for electricity vs gas
 _ELECTRICITY_KINDS = (Kind.CONSUMPTION, Kind.PRODUCTION)
@@ -91,15 +111,13 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         # rolling cache: {(eic, kind): deque[AccountingInterval]} sorted by period_start
         self.cache: dict[tuple[str, Kind], deque[AccountingInterval]] = defaultdict(lambda: deque())
         self.last_meter_errors: dict[str, str] = {}
-        # Cumulative-since-reset tracking. ``latest_sum`` mirrors the most-recent
-        # cumulative sum from external statistics (one per stream); it stays
-        # absent until the first fetch writes/reads a real value. ``baselines``
-        # records the cumulative value at the moment the user pressed reset.
-        # Sensor value = latest_sum - baseline.sum. Baselines are persisted via
-        # the optional ``_store`` so they survive HA restarts.
-        self.latest_sum: dict[tuple[str, Kind], float] = {}
+        # Cumulative-since-reset tracking. The sensor sums raw cache intervals
+        # from ``baseline.reset_at`` onwards plus ``baseline.frozen_sum`` for
+        # intervals that have aged out of the 62-day cache. Baselines are
+        # persisted via the optional ``_store`` so they survive HA restarts.
         self.baselines: dict[tuple[str, Kind], CumulativeBaseline] = {}
         self._store: Store[dict[str, Any]] | None = None
+        self._baselines_dirty = False
 
     def attach_store(self, store: Store[dict[str, Any]]) -> None:
         """Attach the HA storage helper used to persist cumulative baselines.
@@ -151,8 +169,8 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
             )
         except EstfeedError as err:
             raise UpdateFailed(str(err)) from err
-        await self.async_refresh_latest_sums()
         await self.async_ensure_baselines()
+        await self._flush_baselines_if_dirty()
 
     async def async_initial_backfill(self) -> None:
         """Run once at setup if no statistics exist for this entry's streams.
@@ -165,8 +183,8 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         # 12 months ≈ 365 days; backfill_months * 30 keeps things simple and bounded.
         start = end - timedelta(days=self.backfill_months * 30)
         await self._fetch_window(start, end, write_stats=True, force_start=True)
-        await self.async_refresh_latest_sums()
         await self.async_ensure_baselines()
+        await self._flush_baselines_if_dirty()
         # Lagging sensors compute from the cache, not from coordinator.data. Fetch
         # paths that bypass _async_update_data (this method and async_warm_cache,
         # plus the backfill_history service) populate the cache without notifying
@@ -184,8 +202,8 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         end = datetime.now(tz=UTC)
         start = end - timedelta(days=ROLLING_CACHE_DAYS)
         await self._fetch_window(start, end, write_stats=False, force_start=True)
-        await self.async_refresh_latest_sums()
         await self.async_ensure_baselines()
+        await self._flush_baselines_if_dirty()
         self.async_update_listeners()
 
     async def _fetch_window(
@@ -317,24 +335,6 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
             return 0.0
         return float(rows[0].get("sum") or 0.0)
 
-    async def _latest_sum_or_none(self, stream: StatisticStream) -> float | None:
-        """Return the latest cumulative sum, or ``None`` when no stats exist.
-
-        Unlike ``_prior_sum_for_stream`` (which folds the no-rows case to 0.0
-        so the cumulative write loop can keep advancing), the cumulative
-        sensor needs to distinguish "no data yet" from "data exists and the
-        running sum happens to be 0" — otherwise a production stream that
-        legitimately read 0 would be permanently treated as unavailable.
-        """
-        last_stats = await get_instance(self.hass).async_add_executor_job(
-            get_last_statistics, self.hass, 1, stream.statistic_id, True, {"sum"}
-        )
-        rows = last_stats.get(stream.statistic_id)
-        if not rows:
-            return None
-        raw = rows[0].get("sum")
-        return float(raw) if raw is not None else None
-
     def _compute_default_start(self) -> datetime:
         """For the regular hourly tick, start window = now - 30 days as a fallback.
 
@@ -366,62 +366,71 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         bucket.clear()
         bucket.extend(ordered)
         cutoff = datetime.now(tz=UTC) - timedelta(days=ROLLING_CACHE_DAYS)
+        baseline = self.baselines.get((eic, kind))
         while bucket and bucket[0].period_start < cutoff:
-            bucket.popleft()
+            expiring = bucket.popleft()
+            # If a baseline exists and this interval falls between reset_at
+            # and the cache window, preserve its contribution before it ages
+            # out — otherwise the cumulative-since-reset sensor would silently
+            # lose data once a long-running baseline pushes past 62 days.
+            if baseline is None or expiring.period_start < baseline.reset_at:
+                continue
+            value = _interval_value(expiring, kind)
+            if value is None:
+                continue
+            self.baselines[(eic, kind)] = CumulativeBaseline(
+                reset_at=baseline.reset_at,
+                frozen_sum=baseline.frozen_sum + float(value),
+            )
+            baseline = self.baselines[(eic, kind)]
+            self._baselines_dirty = True
 
-    async def async_refresh_latest_sums(self) -> None:
-        """Pull the most-recent cumulative sum per stream from the recorder.
+    def cumulative_since_reset(self, eic: str, kind: Kind) -> float | None:
+        """Return the cumulative consumption/production since the baseline reset.
 
-        Called after each fetch path completes. We read from the recorder
-        rather than tracking writes locally because warm_cache and the
-        diagnostics service intentionally bypass the write loop, and the
-        cumulative sensor must stay accurate across those flows too.
+        Sums raw cache intervals at or after ``baseline.reset_at`` and adds
+        ``baseline.frozen_sum`` for intervals that have already aged out of
+        the rolling cache. Returns ``None`` when no baseline exists yet so
+        the sensor can report unavailable rather than fabricating a zero.
         """
-        for meter in self.meters:
-            for stream in self.streams_for(meter):
-                latest = await self._latest_sum_or_none(stream)
-                if latest is not None:
-                    self.latest_sum[(meter.eic, stream.kind)] = latest
+        baseline = self.baselines.get((eic, kind))
+        if baseline is None:
+            return None
+        total = baseline.frozen_sum
+        for ival in self.cache.get((eic, kind), ()):
+            if ival.period_start < baseline.reset_at:
+                continue
+            value = _interval_value(ival, kind)
+            if value is None:
+                continue
+            total += float(value)
+        return round(total, 3)
 
     async def async_ensure_baselines(self) -> None:
-        """Capture an initial baseline for any (eic, kind) that lacks one.
+        """Capture a baseline for every (meter, kind) that lacks one.
 
         Per the install-time design choice, the cumulative sensor starts at
-        zero and counts forward from the install moment — we capture the
-        cumulative sum at the first refresh that produces real stats. This
-        is idempotent: streams that already have a baseline are left alone,
-        so user-triggered resets are not overwritten by a later refresh.
+        zero and counts forward from the install moment. We capture
+        ``reset_at = now`` unconditionally — backfilled historical intervals
+        are filtered out by the ``period_start >= reset_at`` check in
+        ``cumulative_since_reset``, so capturing before data arrives is safe.
+        Idempotent: existing baselines (including user-triggered resets) are
+        left alone.
         """
-        new_keys: list[tuple[str, Kind]] = []
         now = datetime.now(tz=UTC)
-        for key, latest in self.latest_sum.items():
-            if key in self.baselines:
-                continue
-            self.baselines[key] = CumulativeBaseline(sum=latest, reset_at=now)
-            new_keys.append(key)
-        if new_keys:
-            await self._save_baselines()
+        for meter in self.meters:
+            for kind in (Kind.CONSUMPTION, Kind.PRODUCTION):
+                key = (meter.eic, kind)
+                if key in self.baselines:
+                    continue
+                self.baselines[key] = CumulativeBaseline(reset_at=now)
+                self._baselines_dirty = True
 
     async def async_reset_cumulative(self, eic: str, kind: Kind) -> None:
-        """Capture the current cumulative sum as the new baseline.
-
-        If the stream has no statistics yet (latest_sum missing), the reset
-        is a no-op — there is nothing meaningful to capture, and we would
-        rather the user retry once data has arrived than silently anchor to
-        zero and then jump on the next refresh.
-        """
-        key = (eic, kind)
-        if key not in self.latest_sum:
-            _LOGGER.warning(
-                "Reset requested for %s/%s before any statistics exist; ignored",
-                eic,
-                kind.value,
-            )
-            return
-        self.baselines[key] = CumulativeBaseline(
-            sum=self.latest_sum[key], reset_at=datetime.now(tz=UTC)
-        )
-        await self._save_baselines()
+        """Move ``reset_at`` to now so the cumulative sensor reads 0 again."""
+        self.baselines[(eic, kind)] = CumulativeBaseline(reset_at=datetime.now(tz=UTC))
+        self._baselines_dirty = True
+        await self._flush_baselines_if_dirty()
         self.async_update_listeners()
 
     async def async_load_baselines(self) -> None:
@@ -436,11 +445,17 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
                 eic, kind_value = raw_key.rsplit("|", 1)
                 kind = Kind(kind_value)
                 self.baselines[(eic, kind)] = CumulativeBaseline(
-                    sum=float(raw_val["sum"]),
                     reset_at=datetime.fromisoformat(raw_val["reset_at"]),
+                    frozen_sum=float(raw_val.get("frozen_sum", 0.0)),
                 )
             except (KeyError, ValueError) as err:
                 _LOGGER.warning("Skipping malformed baseline entry %r: %s", raw_key, err)
+
+    async def _flush_baselines_if_dirty(self) -> None:
+        if not self._baselines_dirty:
+            return
+        await self._save_baselines()
+        self._baselines_dirty = False
 
     async def _save_baselines(self) -> None:
         if self._store is None:
@@ -448,8 +463,8 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         payload = {
             "baselines": {
                 f"{eic}|{kind.value}": {
-                    "sum": b.sum,
                     "reset_at": b.reset_at.isoformat(),
+                    "frozen_sum": b.frozen_sum,
                 }
                 for (eic, kind), b in self.baselines.items()
             }

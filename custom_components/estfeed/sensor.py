@@ -160,13 +160,17 @@ class LaggingSensor(_EstfeedEntity, SensorEntity):
 
 
 class CumulativeSinceResetSensor(_EstfeedEntity, SensorEntity):
-    """Monotonically-increasing total since the last reset.
+    """Total consumption/production since the last reset.
 
-    Backed by the recorder's external statistics ``sum`` field (always full
-    history, not the 62-day in-memory cache) minus a baseline captured at
-    install time or on reset-button press. Surfaces ``last_reset`` so HA's
-    Energy dashboard accepts the value dropping back to zero after a reset
-    rather than flagging it as a counter rollback.
+    Computed by summing raw cache intervals from ``baseline.reset_at`` to
+    now, plus ``baseline.frozen_sum`` for intervals that have aged out of
+    the 62-day cache. Reading from raw intervals (not the recorder's
+    cumulative sum column) protects against historical sum-column
+    corruption — a force_start backfill chaining off an already-inflated
+    prior_sum can push the running total up by thousands of kWh, but the
+    raw interval values remain correct. ``last_reset`` is surfaced so HA's
+    Energy dashboard tolerates the reset without flagging a counter
+    rollback.
     """
 
     _attr_state_class = SensorStateClass.TOTAL
@@ -197,17 +201,11 @@ class CumulativeSinceResetSensor(_EstfeedEntity, SensorEntity):
 
     @property
     def available(self) -> bool:
-        key = self._key
-        return key in self.coordinator.latest_sum and key in self.coordinator.baselines
+        return self._key in self.coordinator.baselines
 
     @property
     def native_value(self) -> float | None:
-        key = self._key
-        latest = self.coordinator.latest_sum.get(key)
-        baseline = self.coordinator.baselines.get(key)
-        if latest is None or baseline is None:
-            return None
-        return round(latest - baseline.sum, 3)
+        return self.coordinator.cumulative_since_reset(self._meter.eic, self._kind)
 
     @property
     def last_reset(self) -> datetime | None:
@@ -220,8 +218,8 @@ class CumulativeSinceResetSensor(_EstfeedEntity, SensorEntity):
         return {
             "meter_eic": self._meter.eic,
             "commodity_type": self._meter.commodity_type.value,
-            "baseline_sum": f"{baseline.sum:.3f}" if baseline else "",
             "reset_at": baseline.reset_at.isoformat() if baseline else "",
+            "frozen_sum": f"{baseline.frozen_sum:.3f}" if baseline else "",
         }
 
 

@@ -907,23 +907,20 @@ async def test_coordinator_snaps_request_start_to_top_of_hour(hass):
 
 
 @pytest.mark.asyncio
-async def test_ensure_baselines_captures_initial_baseline(hass):
-    """First refresh after install: every (eic, kind) with a real cumulative
-    sum should get a baseline equal to that sum. The cumulative-since-reset
-    sensor reads 0 immediately afterwards, then grows from there — matches
-    the user's "counts from install" design choice."""
+async def test_ensure_baselines_captures_one_per_meter_kind(hass):
+    """First refresh after install: every (eic, kind) gets a baseline
+    anchored at now. Past intervals brought in by the backfill are filtered
+    out by ``cumulative_since_reset`` via the ``period_start >= reset_at``
+    check, so the sensor reads 0 until forward-time intervals arrive —
+    matches the user's "counts from install" design choice."""
     coordinator = EstfeedCoordinator(hass=hass, client=MagicMock(), slug="home", options={})
     coordinator.meters = [_make_meter()]
-    coordinator.latest_sum = {
-        ("38ZEE-00720089-N", Kind.CONSUMPTION): 1234.5,
-        ("38ZEE-00720089-N", Kind.PRODUCTION): 0.0,
-    }
     await coordinator.async_ensure_baselines()
 
-    assert coordinator.baselines[("38ZEE-00720089-N", Kind.CONSUMPTION)].sum == 1234.5
-    # Production stream with a legitimate 0.0 sum still gets a baseline —
-    # otherwise the entity stays unavailable forever for non-generating meters.
-    assert coordinator.baselines[("38ZEE-00720089-N", Kind.PRODUCTION)].sum == 0.0
+    assert ("38ZEE-00720089-N", Kind.CONSUMPTION) in coordinator.baselines
+    assert ("38ZEE-00720089-N", Kind.PRODUCTION) in coordinator.baselines
+    # New baselines start with no frozen contribution.
+    assert coordinator.baselines[("38ZEE-00720089-N", Kind.CONSUMPTION)].frozen_sum == 0.0
 
 
 @pytest.mark.asyncio
@@ -934,9 +931,8 @@ async def test_ensure_baselines_does_not_overwrite_existing(hass):
     coordinator = EstfeedCoordinator(hass=hass, client=MagicMock(), slug="home", options={})
     coordinator.meters = [_make_meter()]
     key = ("38ZEE-00720089-N", Kind.CONSUMPTION)
-    original = CumulativeBaseline(sum=100.0, reset_at=datetime(2026, 1, 1, tzinfo=UTC))
+    original = CumulativeBaseline(reset_at=datetime(2026, 1, 1, tzinfo=UTC), frozen_sum=42.0)
     coordinator.baselines[key] = original
-    coordinator.latest_sum[key] = 250.0
 
     await coordinator.async_ensure_baselines()
 
@@ -944,58 +940,126 @@ async def test_ensure_baselines_does_not_overwrite_existing(hass):
 
 
 @pytest.mark.asyncio
-async def test_async_reset_cumulative_captures_current_sum(hass):
+async def test_async_reset_cumulative_moves_reset_at_to_now(hass):
     coordinator = EstfeedCoordinator(hass=hass, client=MagicMock(), slug="home", options={})
     coordinator.meters = [_make_meter()]
     key = ("38ZEE-00720089-N", Kind.CONSUMPTION)
-    # Pretend the install-time baseline captured 100; now the cumulative has
-    # grown to 250 and the user presses reset.
-    coordinator.latest_sum[key] = 250.0
     coordinator.baselines[key] = CumulativeBaseline(
-        sum=100.0, reset_at=datetime(2026, 1, 1, tzinfo=UTC)
+        reset_at=datetime(2026, 1, 1, tzinfo=UTC), frozen_sum=150.0
     )
 
     await coordinator.async_reset_cumulative("38ZEE-00720089-N", Kind.CONSUMPTION)
 
-    # Baseline jumps to the current cumulative; sensor reads 0 next refresh.
-    assert coordinator.baselines[key].sum == 250.0
-    # reset_at is now-ish (datetime.now in the method) — just check it's UTC.
-    assert coordinator.baselines[key].reset_at.tzinfo is not None
+    new_baseline = coordinator.baselines[key]
+    # reset_at advanced to "now-ish" (after Jan 1) and frozen_sum cleared so
+    # the sensor reads 0 until new intervals land past the new reset_at.
+    assert new_baseline.reset_at > datetime(2026, 1, 1, tzinfo=UTC)
+    assert new_baseline.frozen_sum == 0.0
 
 
-@pytest.mark.asyncio
-async def test_async_reset_cumulative_noop_without_stats(hass):
-    """Resetting before any statistics exist must NOT capture a zero baseline —
-    otherwise the next refresh anchors the sensor at the install-time
-    cumulative (which could be large) and the user sees a counter jump."""
+def test_cumulative_since_reset_sums_cache_from_reset_at(hass):
+    """Regression: the cumulative sensor must compute from raw cache intervals,
+    not the recorder's cumulative sum column — a force_start backfill chaining
+    off an inflated prior_sum once pushed the running total up by thousands of
+    kWh, but the per-hour interval values stayed correct."""
     coordinator = EstfeedCoordinator(hass=hass, client=MagicMock(), slug="home", options={})
-    coordinator.meters = [_make_meter()]
+    eic = "38ZEE-00720089-N"
+    reset_at = datetime(2026, 5, 18, 12, tzinfo=UTC)
+    coordinator.baselines[(eic, Kind.CONSUMPTION)] = CumulativeBaseline(reset_at=reset_at)
+    # Three intervals: one before reset (excluded), two after (included)
+    coordinator._update_cache(
+        eic,
+        Kind.CONSUMPTION,
+        [
+            AccountingInterval(
+                period_start=datetime(2026, 5, 18, 11, tzinfo=UTC),
+                consumption_kwh=99.0,
+                production_kwh=None,
+                consumption_m3=None,
+                production_m3=None,
+            ),
+            AccountingInterval(
+                period_start=datetime(2026, 5, 18, 13, tzinfo=UTC),
+                consumption_kwh=1.5,
+                production_kwh=None,
+                consumption_m3=None,
+                production_m3=None,
+            ),
+            AccountingInterval(
+                period_start=datetime(2026, 5, 18, 14, tzinfo=UTC),
+                consumption_kwh=2.0,
+                production_kwh=None,
+                consumption_m3=None,
+                production_m3=None,
+            ),
+        ],
+    )
 
-    await coordinator.async_reset_cumulative("38ZEE-00720089-N", Kind.CONSUMPTION)
-
-    assert ("38ZEE-00720089-N", Kind.CONSUMPTION) not in coordinator.baselines
+    assert coordinator.cumulative_since_reset(eic, Kind.CONSUMPTION) == 3.5
 
 
-@pytest.mark.asyncio
-async def test_refresh_latest_sums_skips_streams_without_rows(hass):
-    """A meter+kind with no statistics rows yet should NOT be added to
-    latest_sum — keeping it absent is what makes the cumulative sensor
-    report unavailable instead of zero before backfill completes."""
+def test_cumulative_since_reset_returns_none_without_baseline(hass):
     coordinator = EstfeedCoordinator(hass=hass, client=MagicMock(), slug="home", options={})
-    coordinator.meters = [_make_meter()]
+    assert coordinator.cumulative_since_reset("38ZEE-00720089-N", Kind.CONSUMPTION) is None
 
-    # No rows for any stream → method returns None for both consumption and
-    # production, so latest_sum stays empty.
-    with (
-        patch(
-            "custom_components.estfeed.coordinator.get_instance",
-            return_value=_fake_recorder(),
-        ),
-        patch(
-            "custom_components.estfeed.coordinator.get_last_statistics",
-            new=MagicMock(return_value={}),
-        ),
-    ):
-        await coordinator.async_refresh_latest_sums()
 
-    assert coordinator.latest_sum == {}
+def test_cumulative_since_reset_includes_frozen_sum(hass):
+    """When intervals age out of the 62-day cache, their consumption is
+    captured into ``baseline.frozen_sum``. The cumulative sensor must add
+    that frozen contribution to whatever is currently in the cache."""
+    coordinator = EstfeedCoordinator(hass=hass, client=MagicMock(), slug="home", options={})
+    eic = "38ZEE-00720089-N"
+    coordinator.baselines[(eic, Kind.CONSUMPTION)] = CumulativeBaseline(
+        reset_at=datetime(2026, 1, 1, tzinfo=UTC),
+        frozen_sum=500.0,
+    )
+    coordinator._update_cache(
+        eic,
+        Kind.CONSUMPTION,
+        [
+            AccountingInterval(
+                period_start=datetime.now(tz=UTC) - timedelta(hours=1),
+                consumption_kwh=1.5,
+                production_kwh=None,
+                consumption_m3=None,
+                production_m3=None,
+            )
+        ],
+    )
+
+    assert coordinator.cumulative_since_reset(eic, Kind.CONSUMPTION) == 501.5
+
+
+def test_update_cache_folds_expiring_intervals_into_frozen_sum(hass):
+    """Regression: a long-running baseline must not lose data once intervals
+    age past the 62-day cache. Before trimming, the cache stashes the
+    eligible expiring intervals (past reset_at, non-null) into the
+    baseline's ``frozen_sum`` so the cumulative sensor remains correct."""
+    coordinator = EstfeedCoordinator(hass=hass, client=MagicMock(), slug="home", options={})
+    eic = "38ZEE-00720089-N"
+    coordinator.baselines[(eic, Kind.CONSUMPTION)] = CumulativeBaseline(
+        reset_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+    now = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0)
+    # Build a batch where one interval is *just* old enough to be trimmed
+    # (older than ROLLING_CACHE_DAYS) and one is recent enough to stay.
+    expiring = AccountingInterval(
+        period_start=now - timedelta(days=70),
+        consumption_kwh=4.0,
+        production_kwh=None,
+        consumption_m3=None,
+        production_m3=None,
+    )
+    recent = AccountingInterval(
+        period_start=now - timedelta(hours=1),
+        consumption_kwh=1.0,
+        production_kwh=None,
+        consumption_m3=None,
+        production_m3=None,
+    )
+    coordinator._update_cache(eic, Kind.CONSUMPTION, [expiring, recent])
+
+    baseline = coordinator.baselines[(eic, Kind.CONSUMPTION)]
+    assert baseline.frozen_sum == 4.0
+    # Cumulative = frozen 4 + cached 1 = 5
+    assert coordinator.cumulative_since_reset(eic, Kind.CONSUMPTION) == 5.0

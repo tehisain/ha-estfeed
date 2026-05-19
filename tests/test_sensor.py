@@ -170,30 +170,36 @@ def test_lagging_sensor_unavailable_when_cache_empty():
     assert sensor.available is False
 
 
-def test_cumulative_sensor_subtracts_baseline_from_latest_sum():
+def test_cumulative_sensor_delegates_to_coordinator():
+    """The sensor's value comes straight from
+    ``coordinator.cumulative_since_reset`` so the cache-based computation is
+    exercised end-to-end. A regression that re-introduced the legacy
+    ``latest_sum - baseline.sum`` formula (which inherited recorder-cumulative
+    corruption and showed +6490 kWh against a real ~12 kWh) would fail here."""
     coordinator = MagicMock()
-    coordinator.latest_sum = {("38ZEE-00720089-N", Kind.CONSUMPTION): 250.0}
+    coordinator.slug = "home"
     coordinator.baselines = {
         ("38ZEE-00720089-N", Kind.CONSUMPTION): CumulativeBaseline(
-            sum=100.0, reset_at=datetime(2026, 1, 1, tzinfo=UTC)
+            reset_at=datetime(2026, 5, 18, 12, tzinfo=UTC)
         )
     }
-    coordinator.slug = "home"
+    coordinator.cumulative_since_reset.return_value = 12.345
 
     sensor = CumulativeSinceResetSensor(coordinator, _meter(), Kind.CONSUMPTION)
 
     assert sensor.available is True
-    assert sensor.native_value == 150.0
-    assert sensor.last_reset == datetime(2026, 1, 1, tzinfo=UTC)
+    assert sensor.native_value == 12.345
+    coordinator.cumulative_since_reset.assert_called_with("38ZEE-00720089-N", Kind.CONSUMPTION)
+    assert sensor.last_reset == datetime(2026, 5, 18, 12, tzinfo=UTC)
     assert sensor.unique_id == "estfeed_home_consumption_cumulative_089n"
 
 
-def test_cumulative_sensor_unavailable_before_first_refresh():
-    """No latest_sum and no baseline → sensor is unavailable. This is the
-    state during initial setup before the first fetch completes."""
+def test_cumulative_sensor_unavailable_before_baseline_exists():
+    """No baseline yet → sensor is unavailable. This is the state between
+    setup and the first ``async_ensure_baselines`` call."""
     coordinator = MagicMock()
-    coordinator.latest_sum = {}
     coordinator.baselines = {}
+    coordinator.cumulative_since_reset.return_value = None
     coordinator.slug = "home"
 
     sensor = CumulativeSinceResetSensor(coordinator, _meter(), Kind.CONSUMPTION)
@@ -203,14 +209,12 @@ def test_cumulative_sensor_unavailable_before_first_refresh():
 
 
 def test_cumulative_sensor_reads_zero_immediately_after_reset():
-    """Right after the user presses reset, the baseline equals latest_sum;
-    the sensor must read exactly 0 until the next interval lands."""
+    """Right after the user presses reset, no cache intervals are past
+    reset_at — coordinator returns 0.0 and the sensor surfaces that."""
     coordinator = MagicMock()
     key = ("38ZEE-00720089-N", Kind.CONSUMPTION)
-    coordinator.latest_sum = {key: 1234.5}
-    coordinator.baselines = {
-        key: CumulativeBaseline(sum=1234.5, reset_at=datetime(2026, 5, 18, tzinfo=UTC))
-    }
+    coordinator.baselines = {key: CumulativeBaseline(reset_at=datetime(2026, 5, 18, tzinfo=UTC))}
+    coordinator.cumulative_since_reset.return_value = 0.0
     coordinator.slug = "home"
 
     sensor = CumulativeSinceResetSensor(coordinator, _meter(), Kind.CONSUMPTION)
