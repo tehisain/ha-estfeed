@@ -13,3 +13,16 @@ backfill_history:
       selector:
         config_entry:
           integration: estfeed
+
+set_cumulative_reset_at:
+  fields:
+    reset_at:
+      example: "2026-05-18T12:29:58+00:00"
+      required: true
+      selector:
+        datetime:
+    entry_id:
+      example: 0123456789abcdef
+      selector:
+        config_entry:
+          integration: estfeed

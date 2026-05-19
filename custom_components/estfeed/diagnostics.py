@@ -36,6 +36,19 @@ async def async_get_config_entry_diagnostics(
                 for eic in {m.eic for m in coordinator.meters}
             },
             "last_meter_errors": dict(coordinator.last_meter_errors),
+            "baselines": {
+                f"...REDACTED-{eic_suffix(eic)}|{kind.value}": {
+                    "reset_at": b.reset_at.isoformat(),
+                    "frozen_sum": b.frozen_sum,
+                }
+                for (eic, kind), b in coordinator.baselines.items()
+            },
+            "cumulative_since_reset": {
+                f"...REDACTED-{eic_suffix(eic)}|{kind.value}": (
+                    coordinator.cumulative_since_reset(eic, kind)
+                )
+                for (eic, kind) in coordinator.baselines
+            },
         },
         "meters": [
             {

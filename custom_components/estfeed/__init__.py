@@ -45,6 +45,14 @@ SERVICE_BACKFILL_SCHEMA = vol.Schema(
     }
 )
 
+SERVICE_SET_CUMULATIVE_RESET_AT = "set_cumulative_reset_at"
+SERVICE_SET_CUMULATIVE_RESET_AT_SCHEMA = vol.Schema(
+    {
+        vol.Required("reset_at"): cv.datetime,
+        vol.Optional("entry_id"): cv.string,
+    }
+)
+
 
 def _slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "estfeed"
@@ -136,3 +144,25 @@ def _async_register_services(hass: HomeAssistant) -> None:
             await coord.async_initial_backfill()
 
     hass.services.async_register(DOMAIN, SERVICE_BACKFILL, _handle, schema=SERVICE_BACKFILL_SCHEMA)
+
+    async def _set_reset_at(call: ServiceCall) -> None:
+        from .const import Kind  # local import — avoids cycling const into top of __init__
+
+        reset_at = call.data["reset_at"]
+        if reset_at.tzinfo is None:
+            reset_at = reset_at.replace(tzinfo=UTC)
+        entry_id = call.data.get("entry_id")
+        targets = (
+            [hass.data[DOMAIN][entry_id]]
+            if entry_id and entry_id in hass.data[DOMAIN]
+            else list(hass.data.get(DOMAIN, {}).values())
+        )
+        for coord in targets:
+            await coord.async_set_cumulative_reset_at(reset_at, kinds=(Kind.CONSUMPTION,))
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_CUMULATIVE_RESET_AT,
+        _set_reset_at,
+        schema=SERVICE_SET_CUMULATIVE_RESET_AT_SCHEMA,
+    )

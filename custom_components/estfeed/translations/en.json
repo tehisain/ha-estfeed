@@ -67,6 +67,14 @@
         "months": { "name": "Months", "description": "How many months of history to refetch (1-84)." },
         "entry_id": { "name": "Config entry", "description": "Which Estfeed config entry to backfill." }
       }
+    },
+    "set_cumulative_reset_at": {
+      "name": "Set cumulative reset_at",
+      "description": "Move the cumulative-since-reset baseline to a specific timestamp (e.g. to restore a previous anchor).",
+      "fields": {
+        "reset_at": { "name": "Reset at", "description": "New anchor timestamp. The cumulative sensor will sum intervals from this moment forward." },
+        "entry_id": { "name": "Config entry", "description": "Which Estfeed config entry to update." }
+      }
     }
   }
 }

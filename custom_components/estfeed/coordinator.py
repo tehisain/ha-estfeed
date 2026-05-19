@@ -433,14 +433,37 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         await self._flush_baselines_if_dirty()
         self.async_update_listeners()
 
+    async def async_set_cumulative_reset_at(
+        self,
+        reset_at: datetime,
+        *,
+        kinds: tuple[Kind, ...] = (Kind.CONSUMPTION, Kind.PRODUCTION),
+    ) -> None:
+        """Service-driven baseline rewind/forward.
+
+        Lets the user restore a previous ``reset_at`` (e.g., after an
+        unrelated HA restart unintentionally recreated the baseline) without
+        the cumulative jumping back to zero. ``frozen_sum`` is also reset
+        since the rebuild walks the cache forward from the new anchor.
+        """
+        for meter in self.meters:
+            for kind in kinds:
+                self.baselines[(meter.eic, kind)] = CumulativeBaseline(reset_at=reset_at)
+                self._baselines_dirty = True
+        await self._flush_baselines_if_dirty()
+        self.async_update_listeners()
+
     async def async_load_baselines(self) -> None:
         """Hydrate ``self.baselines`` from the Store, if one is attached."""
         if self._store is None:
             return
         data = await self._store.async_load()
         if not data:
+            _LOGGER.info("No persisted baselines found; starting fresh")
             return
-        for raw_key, raw_val in (data.get("baselines") or {}).items():
+        entries = (data.get("baselines") or {}).items()
+        loaded = 0
+        for raw_key, raw_val in entries:
             try:
                 eic, kind_value = raw_key.rsplit("|", 1)
                 kind = Kind(kind_value)
@@ -448,8 +471,10 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
                     reset_at=datetime.fromisoformat(raw_val["reset_at"]),
                     frozen_sum=float(raw_val.get("frozen_sum", 0.0)),
                 )
+                loaded += 1
             except (KeyError, ValueError) as err:
                 _LOGGER.warning("Skipping malformed baseline entry %r: %s", raw_key, err)
+        _LOGGER.info("Loaded %d baseline(s) from storage", loaded)
 
     async def _flush_baselines_if_dirty(self) -> None:
         if not self._baselines_dirty:

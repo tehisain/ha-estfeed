@@ -67,6 +67,14 @@
         "months": { "name": "Kuud", "description": "Mitme kuu ajalugu uuesti laadida (1-84)." },
         "entry_id": { "name": "Konfig kirje", "description": "Millise Estfeed kirje ajalugu laadida." }
       }
+    },
+    "set_cumulative_reset_at": {
+      "name": "Määra kumulatiivse lähtestus",
+      "description": "Liiguta kumulatiivse arvesti algushetk soovitud ajale (nt taasta varasem ankur).",
+      "fields": {
+        "reset_at": { "name": "Lähtestus", "description": "Uus algushetk. Kumulatiivne sensor summeerib intervallid alates sellest hetkest." },
+        "entry_id": { "name": "Konfig kirje", "description": "Millise Estfeed kirje algushetk uuendada." }
+      }
     }
   }
 }
