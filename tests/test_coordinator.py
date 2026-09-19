@@ -9,6 +9,7 @@ import pytest
 
 from custom_components.estfeed.api import (
     AccountingInterval,
+    EstfeedAuthError,
     MeterData,
     MeteringPoint,
     Period,
@@ -105,7 +106,10 @@ async def test_coordinator_first_update_fetches_and_writes(hass):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_uses_latest_seen_as_start(hass):
+async def test_coordinator_uses_latest_seen_as_start(hass, freezer):
+    # Freeze inside the 30-day default window of the mocked latest_seen so
+    # the test does not rot as wall-clock time passes.
+    freezer.move_to("2026-05-05 12:00:00+00:00")
     client = MagicMock()
     client.list_metering_points = AsyncMock(return_value=[_make_meter()])
     client.get_metering_data = AsyncMock(
@@ -302,13 +306,14 @@ async def test_coordinator_chains_prior_sum_across_chunks_on_regular_tick(hass):
 
 
 @pytest.mark.asyncio
-async def test_force_start_writes_reset_prior_sum_to_zero(hass):
-    """force_start=True (initial backfill, manual rebuild service) must rebuild
-    history from prior_sum=0, NOT chain off the current latest sum. Otherwise
-    historical buckets get offset by whatever the cumulative happens to be —
-    e.g., calling backfill_history while stats already exist would inflate
-    every backfilled hour by the current sum, producing visibly wrong totals
-    in the Energy dashboard.
+async def test_force_start_seeds_prior_sum_from_before_window(hass):
+    """force_start=True (initial backfill, manual rebuild service) must seed
+    prior_sum from the cumulative sum the series had just BEFORE the window
+    start — NOT from the current latest sum (that was the original inflation
+    bug: every backfilled hour got offset by whatever the cumulative happens
+    to be right now), and NOT hardcoded 0.0 (that creates a mid-series sum
+    drop the Energy dashboard reads as a counter rollback when the rebuild
+    window is shorter than the existing history).
     """
     meter = _make_meter()
     client = MagicMock()
@@ -333,8 +338,10 @@ async def test_force_start_writes_reset_prior_sum_to_zero(hass):
     start = datetime(2026, 1, 1, 0, tzinfo=UTC)
     end = datetime(2026, 3, 12, 0, tzinfo=UTC)
     write_mock = AsyncMock(side_effect=[12.0, 24.0, 36.0] * 4)
-    # 999.0 simulates a stale prior cumulative — the bug would chain off this.
+    # 999.0 simulates the *current* cumulative — the old bug chained off this.
     prior_mock = AsyncMock(return_value=999.0)
+    # 7.0 simulates a pre-window row (e.g. older history outside the rebuild).
+    sum_before_mock = AsyncMock(return_value=7.0)
 
     with (
         patch(
@@ -346,6 +353,7 @@ async def test_force_start_writes_reset_prior_sum_to_zero(hass):
             new=MagicMock(return_value={}),
         ),
         patch.object(coordinator, "_prior_sum_for_stream", new=prior_mock),
+        patch.object(coordinator, "_sum_before_window", new=sum_before_mock),
         patch(
             "custom_components.estfeed.coordinator.async_write_meter_statistics",
             new=write_mock,
@@ -353,13 +361,59 @@ async def test_force_start_writes_reset_prior_sum_to_zero(hass):
     ):
         await coordinator._fetch_window(start, end, write_stats=True, force_start=True)
 
-    # The expensive get_last_statistics read is skipped entirely on force_start.
+    # The expensive latest-sum read must not be used on force_start.
     assert prior_mock.call_count == 0
-    # First write per stream uses prior_sum=0.0 (clean rebuild).
+    # First write per stream uses prior_sum=7.0 (seeded from before the window).
     for call in write_mock.call_args_list[:2]:
-        assert call.kwargs["prior_sum"] == 0.0
+        assert call.kwargs["prior_sum"] == 7.0
     # Subsequent writes still chain via the returned running sum.
     assert write_mock.call_args_list[2].kwargs["prior_sum"] == 12.0
+
+
+@pytest.mark.asyncio
+async def test_force_start_seeds_zero_when_no_prior_history(hass):
+    """Fresh install: nothing exists before the window, so the seed is 0.0
+    (delegates to _sum_before_window, which returns 0.0 for empty stats)."""
+    meter = _make_meter()
+    client = MagicMock()
+    client.list_metering_points = AsyncMock(return_value=[meter])
+    client.get_metering_data = AsyncMock(
+        return_value=[MeterData(eic="38ZEE-00720089-N", intervals=[])]
+    )
+
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={CONF_RESOLUTION: Resolution.HOUR.value, CONF_BACKFILL_MONTHS: 12},
+    )
+    coordinator.meters = [meter]
+
+    sum_before_mock = AsyncMock(return_value=0.0)
+
+    with (
+        patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.get_last_statistics",
+            new=MagicMock(return_value={}),
+        ),
+        patch.object(coordinator, "_sum_before_window", new=sum_before_mock),
+        patch(
+            "custom_components.estfeed.coordinator.async_write_meter_statistics",
+            new=AsyncMock(),
+        ),
+    ):
+        await coordinator._fetch_window(
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2026, 3, 12, tzinfo=UTC),
+            write_stats=True,
+            force_start=True,
+        )
+
+    assert sum_before_mock.call_count == 2  # once per energy stream
 
 
 @pytest.mark.asyncio
@@ -387,6 +441,7 @@ async def test_initial_backfill_uses_backfill_months(hass):
             "custom_components.estfeed.coordinator.get_last_statistics",
             new=MagicMock(return_value={}),
         ),
+        patch.object(coordinator, "_sum_before_window", new=AsyncMock(return_value=0.0)),
         patch(
             "custom_components.estfeed.coordinator.async_write_meter_statistics",
             new=AsyncMock(),
@@ -501,6 +556,7 @@ async def test_initial_backfill_notifies_listeners(hass):
             "custom_components.estfeed.coordinator.get_last_statistics",
             new=MagicMock(return_value={}),
         ),
+        patch.object(coordinator, "_sum_before_window", new=AsyncMock(return_value=0.0)),
         patch(
             "custom_components.estfeed.coordinator.async_write_meter_statistics",
             new=AsyncMock(),
@@ -510,10 +566,13 @@ async def test_initial_backfill_notifies_listeners(hass):
     listener.assert_called()
 
 
-def test_update_cache_dedupes_overlapping_writes(hass):
+def test_update_cache_dedupes_overlapping_writes(hass, freezer):
     """Regression: backfill chunks overlap with first_refresh's window. Without
     dedup the bucket double-counts the overlap and lagging-period sensors
     inflate (observed: 620 kWh for a month whose true total was 228 kWh)."""
+    # Freeze shortly after the fixture dates so they stay inside the 62-day
+    # rolling cache window regardless of when the test runs.
+    freezer.move_to("2026-05-10 00:00:00+00:00")
     coordinator = EstfeedCoordinator(
         hass=hass,
         client=MagicMock(),
@@ -542,7 +601,7 @@ def test_update_cache_dedupes_overlapping_writes(hass):
     assert len(bucket) == 875
 
 
-def test_update_cache_replaces_null_with_later_value(hass):
+def test_update_cache_replaces_null_with_later_value(hass, freezer):
     """Regression: Estfeed returns recent intervals with consumption_kwh=None
     while the hour is still being settled (the API surfaces the row before the
     value lands). A later fetch returns the same period_start with a real
@@ -551,6 +610,7 @@ def test_update_cache_replaces_null_with_later_value(hass):
     Observed live as today=0.374 / yesterday=6.383 while recorder stats had
     the same hours at ~0.4 kWh each totalling 11.5 kWh.
     """
+    freezer.move_to("2026-05-20 00:00:00+00:00")
     coordinator = EstfeedCoordinator(
         hass=hass,
         client=MagicMock(),
@@ -854,6 +914,7 @@ async def test_coordinator_force_start_ignores_bound(hass):
             new=MagicMock(return_value={}),
         ),
         patch.object(coordinator, "_latest_seen_for_stream", new=fake_latest_seen),
+        patch.object(coordinator, "_sum_before_window", new=AsyncMock(return_value=0.0)),
         patch(
             "custom_components.estfeed.coordinator.async_write_meter_statistics",
             new=AsyncMock(return_value=0.0),
@@ -1168,6 +1229,7 @@ async def test_fetch_meter_window_writes_cost_and_compensation_for_electricity(h
         ) as mock_cost,
         patch.object(coord, "_latest_seen_for_stream", new=AsyncMock(return_value=None)),
         patch.object(coord, "_prior_sum_for_stream", new=AsyncMock(return_value=0.0)),
+        patch.object(coord, "_sum_before_window", new=AsyncMock(return_value=0.0)),
     ):
         await coord._fetch_meter_window(
             _make_meter(),
@@ -1201,6 +1263,7 @@ async def test_fetch_meter_window_skips_cost_for_gas_meter(hass):
         ) as mock_cost,
         patch.object(coord, "_latest_seen_for_stream", new=AsyncMock(return_value=None)),
         patch.object(coord, "_prior_sum_for_stream", new=AsyncMock(return_value=0.0)),
+        patch.object(coord, "_sum_before_window", new=AsyncMock(return_value=0.0)),
     ):
         await coord._fetch_meter_window(
             _gas_meter(),
@@ -1243,6 +1306,7 @@ async def test_fetch_meter_window_records_nps_error_on_failure(hass):
         ) as mock_cost,
         patch.object(coord, "_latest_seen_for_stream", new=AsyncMock(return_value=None)),
         patch.object(coord, "_prior_sum_for_stream", new=AsyncMock(return_value=0.0)),
+        patch.object(coord, "_sum_before_window", new=AsyncMock(return_value=0.0)),
     ):
         await coord._fetch_meter_window(
             _make_meter(),
@@ -1286,6 +1350,7 @@ async def test_async_rebuild_cost_derives_from_stored_energy_not_api(hass):
 
     with (
         patch.object(coord, "_hourly_energy_from_stats", new=AsyncMock(side_effect=_fake_hourly)),
+        patch.object(coord, "_sum_before_window", new=AsyncMock(return_value=4.0)),
         patch(
             "custom_components.estfeed.coordinator.async_write_cost_statistics_from_hourly",
             new=AsyncMock(return_value=0.122),
@@ -1300,6 +1365,8 @@ async def test_async_rebuild_cost_derives_from_stored_energy_not_api(hass):
     ]
     assert len(consumption_calls) == 1
     assert consumption_calls[0].args[2] == {h10: 2.0}  # hourly_energy arg
+    # Rebuild chains onto the pre-window sum instead of restarting at 0.
+    assert consumption_calls[0].kwargs["prior_sum"] == 4.0
 
 
 @pytest.mark.asyncio
@@ -1311,3 +1378,192 @@ async def test_async_rebuild_cost_noop_without_nps_client(hass):
     with patch.object(coord, "_hourly_energy_from_stats", new=AsyncMock()) as mock_hourly:
         await coord.async_rebuild_cost()
     mock_hourly.assert_not_called()
+
+
+# ---- NPS partial-quarter eviction + rebuild hardening ----
+
+
+@pytest.mark.asyncio
+async def test_tick_evicts_unsettled_nps_hours_before_pricing(hass):
+    """Regression: Elering publishes 15-min NPS quarters progressively. An hour
+    first priced mid-settlement would keep its partial-quarter mean in the
+    process-lifetime cache forever. The regular tick must evict hours newer
+    than the settle horizon before fetching prices so they are re-priced with
+    complete data."""
+    client = MagicMock()
+    client.get_metering_data = AsyncMock(
+        return_value=[MeterData(eic="38ZEE-00720089-N", intervals=[], error=None)]
+    )
+    coord = EstfeedCoordinator(hass=hass, client=client, slug="home", options={})
+    coord.meters = [_make_meter()]
+    mock_nps = MagicMock()
+    mock_nps.async_get_prices = AsyncMock(return_value={})
+    coord.attach_nps_client(mock_nps)
+
+    before = datetime.now(tz=UTC)
+    with (
+        patch.object(coord, "_latest_seen_for_stream", new=AsyncMock(return_value=None)),
+        patch.object(coord, "_prior_sum_for_stream", new=AsyncMock(return_value=0.0)),
+        patch.object(coord, "_sum_before_window", new=AsyncMock(return_value=0.0)),
+        patch(
+            "custom_components.estfeed.coordinator.async_write_meter_statistics",
+            new=AsyncMock(return_value=0.0),
+        ),
+    ):
+        await coord._fetch_meter_window(
+            _make_meter(),
+            datetime(2026, 5, 21, 10, tzinfo=UTC),
+            datetime(2026, 5, 21, 12, tzinfo=UTC),
+            write_stats=True,
+            force_start=True,
+        )
+    after = datetime.now(tz=UTC)
+
+    mock_nps.evict_after.assert_called_once()
+    cutoff = mock_nps.evict_after.call_args.args[0]
+    # Cutoff = now - 2h, evaluated inside the tick.
+    assert before - timedelta(hours=2) <= cutoff <= after - timedelta(hours=2)
+
+
+@pytest.mark.asyncio
+async def test_async_rebuild_cost_aborts_on_total_nps_failure(hass):
+    """A total NPS failure must abort the rebuild rather than write a
+    partially-priced series — a partial write would advance latest_seen past
+    the unpriced gap, which later ticks cannot backfill."""
+    client = MagicMock()
+    coord = EstfeedCoordinator(
+        hass=hass, client=client, slug="home", options={CONF_BACKFILL_MONTHS: 6}
+    )
+    coord.meters = [_make_meter()]
+    mock_nps = MagicMock()
+    mock_nps.clear_cache = MagicMock()
+    from custom_components.estfeed.nps import NpsError
+
+    mock_nps.async_get_prices = AsyncMock(side_effect=NpsError("down"))
+    coord.attach_nps_client(mock_nps)
+
+    with (
+        patch.object(coord, "_hourly_energy_from_stats", new=AsyncMock()) as mock_hourly,
+        patch(
+            "custom_components.estfeed.coordinator.async_write_cost_statistics_from_hourly",
+            new=AsyncMock(),
+        ) as mock_write,
+    ):
+        await coord.async_rebuild_cost()
+
+    mock_hourly.assert_not_called()
+    mock_write.assert_not_called()
+    assert coord.last_nps_error is not None
+    assert "down" in coord.last_nps_error
+
+
+@pytest.mark.asyncio
+async def test_sum_before_window_subtracts_change_over_window(hass):
+    """_sum_before_window = latest_sum - sum of change[start, end): the cumulative
+    the series had just before the window start, with both queries bounded."""
+    coordinator = EstfeedCoordinator(hass=hass, client=MagicMock(), slug="home", options={})
+
+    last_stats = {"estfeed:home_consumption_089n": [{"sum": 100.0}]}
+    during = {
+        "estfeed:home_consumption_089n": [
+            {"start": 1.0, "change": 2.0},
+            {"start": 2.0, "change": 3.0},
+        ]
+    }
+
+    def _fake_during_period(hass, start, end, ids, period, units, types):  # noqa: ARG001
+        assert types == {"change"}
+        return during
+
+    with (
+        patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.get_last_statistics",
+            new=MagicMock(return_value=last_stats),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.statistics_during_period",
+            new=MagicMock(side_effect=_fake_during_period),
+        ),
+    ):
+        result = await coordinator._sum_before_window(
+            "estfeed:home_consumption_089n",
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2026, 6, 1, tzinfo=UTC),
+        )
+
+    assert result == 95.0  # 100.0 - (2.0 + 3.0)
+
+
+# ---- Reauth on runtime auth failure ----
+
+
+@pytest.mark.asyncio
+async def test_auth_error_starts_reauth_flow(hass):
+    """A mid-flight EstfeedAuthError must surface UpdateFailed and hand the
+    user the reauth flow instead of retrying dead credentials forever."""
+    # The reauth flow pulls in the integration's recorder dependency.
+    from homeassistant.components import recorder
+    from homeassistant.config_entries import SOURCE_REAUTH
+    from homeassistant.helpers import recorder as recorder_helper
+    from homeassistant.helpers.update_coordinator import UpdateFailed
+    from homeassistant.setup import async_setup_component
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.estfeed.const import (
+        CONF_CLIENT_ID,
+        CONF_CLIENT_SECRET,
+        CONF_FRIENDLY_NAME,
+        DOMAIN,
+    )
+
+    with patch("homeassistant.components.recorder.ALLOW_IN_MEMORY_DB", True):
+        if recorder.DOMAIN not in hass.data:
+            recorder_helper.async_initialize_recorder(hass)
+        assert await async_setup_component(
+            hass,
+            recorder.DOMAIN,
+            {recorder.DOMAIN: {"db_url": "sqlite://", "commit_interval": 0}},
+        )
+        await hass.async_block_till_done()
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CLIENT_ID: "c", CONF_CLIENT_SECRET: "s", CONF_FRIENDLY_NAME: "Home"},
+        options={},
+        unique_id="c",
+    )
+    entry.add_to_hass(hass)
+
+    client = MagicMock()
+    client.get_metering_data = AsyncMock(side_effect=EstfeedAuthError("401: revoked"))
+
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={},
+        config_entry=entry,
+    )
+    coordinator.meters = [_make_meter()]
+
+    with (
+        patch(
+            "custom_components.estfeed.coordinator.get_instance",
+            return_value=_fake_recorder(),
+        ),
+        patch(
+            "custom_components.estfeed.coordinator.get_last_statistics",
+            new=MagicMock(return_value={}),
+        ),
+        pytest.raises(UpdateFailed),
+    ):
+        await coordinator._async_update_data()
+
+    # async_start_reauth spawns the flow in a background task.
+    await hass.async_block_till_done()
+    flows = hass.config_entries.flow.async_progress()
+    assert any(flow["context"].get("source") == SOURCE_REAUTH for flow in flows)

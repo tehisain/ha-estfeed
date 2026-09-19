@@ -13,6 +13,7 @@ from homeassistant.components.recorder.statistics import (
     get_last_statistics,
     statistics_during_period,
 )
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.recorder import get_instance
 from homeassistant.helpers.storage import Store
@@ -20,9 +21,11 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import (
     AccountingInterval,
+    EstfeedAuthError,
     EstfeedClient,
     EstfeedError,
     MeteringPoint,
+    interval_value,
 )
 from .const import (
     CONF_BACKFILL_MONTHS,
@@ -38,7 +41,7 @@ from .const import (
     Kind,
     Resolution,
 )
-from .nps import EleringNpsClient, NpsError
+from .nps import NPS_PRICE_SETTLE_HOURS, EleringNpsClient, NpsError
 from .pricing import make_tariff
 from .statistics import (
     CostStream,
@@ -75,17 +78,6 @@ class CumulativeBaseline:
 _LOGGER = logging.getLogger(__name__)
 
 
-def _interval_value(interval: AccountingInterval, kind: Kind) -> float | None:
-    """Return the kWh/m³ value for a kind, falling back across units."""
-    if kind == Kind.CONSUMPTION:
-        if interval.consumption_kwh is not None:
-            return interval.consumption_kwh
-        return interval.consumption_m3
-    if interval.production_kwh is not None:
-        return interval.production_kwh
-    return interval.production_m3
-
-
 # Kind / unit mapping for electricity vs gas
 _ELECTRICITY_KINDS = (Kind.CONSUMPTION, Kind.PRODUCTION)
 _GAS_KINDS = (Kind.CONSUMPTION, Kind.PRODUCTION)
@@ -110,12 +102,14 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         client: EstfeedClient,
         slug: str,
         options: dict[str, Any],
+        config_entry: ConfigEntry | None = None,
     ) -> None:
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN}_{slug}",
             update_interval=UPDATE_INTERVAL,
+            config_entry=config_entry,
         )
         self._client = client
         self.slug = slug
@@ -169,23 +163,37 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         """Number of cached NPS hourly prices. Zero when no client is attached."""
         return self._nps.cache_size if self._nps is not None else 0
 
+    def nps_cache_snapshot(self, hours: list[datetime]) -> dict[str, float | None]:
+        """Cached EUR/kWh prices for the given hours, keyed by ISO string.
+
+        Public accessor used by diagnostics so it does not need to reach
+        into the private ``_nps`` client.
+        """
+        if self._nps is None:
+            return {}
+        return self._nps.cache_snapshot(hours)
+
     def cost_streams_for(self, meter: MeteringPoint) -> list[CostStream]:
-        """Cost + compensation streams for one meter; empty list for gas."""
+        """Cost + compensation streams for one meter; empty list for gas.
+
+        The unit is always EUR: NPS prices are EUR and no conversion is
+        applied, so labelling the statistic with ``hass.config.currency``
+        would mislabel EUR amounts as e.g. USD for non-EUR installations.
+        """
         if meter.commodity_type.value != "ELECTRICITY":
             return []
         suffix = eic_suffix(meter.eic)
-        currency = self.hass.config.currency or "EUR"
         return [
             CostStream(
                 statistic_id=f"{DOMAIN}:{self.slug}_cost_{suffix}",
                 name=f"{self.slug} cost ({meter.eic})",
-                unit=currency,
+                unit="EUR",
                 kind=Kind.CONSUMPTION,
             ),
             CostStream(
                 statistic_id=f"{DOMAIN}:{self.slug}_compensation_{suffix}",
                 name=f"{self.slug} compensation ({meter.eic})",
-                unit=currency,
+                unit="EUR",
                 kind=Kind.PRODUCTION,
             ),
         ]
@@ -223,21 +231,31 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
                 write_stats=True,
                 force_start=False,
             )
+        except EstfeedAuthError as err:
+            # Credentials were rejected mid-flight (key rotated/revoked).
+            # Surface the failure and hand the user the reauth flow instead
+            # of retrying with the same dead credentials forever.
+            if self.config_entry is not None:
+                self.config_entry.async_start_reauth(self.hass)
+            raise UpdateFailed(str(err)) from err
         except EstfeedError as err:
             raise UpdateFailed(str(err)) from err
         await self.async_ensure_baselines()
         await self._flush_baselines_if_dirty()
 
-    async def async_initial_backfill(self) -> None:
+    async def async_initial_backfill(self, months: int | None = None) -> None:
         """Run once at setup if no statistics exist for this entry's streams.
 
-        Walks 12 months of history (or whatever `backfill_months` is set to). Because
-        no prior stats exist on first install, prior_sum starts at 0 and the cumulative
-        counter is built correctly from the earliest backfilled interval.
+        Walks 12 months of history (or whatever `backfill_months` is set to;
+        the ``months`` override is used by the backfill service without
+        mutating the persisted options). Because no prior stats exist on
+        first install, prior_sum starts at 0 and the cumulative counter is
+        built correctly from the earliest backfilled interval.
         """
         end = datetime.now(tz=UTC)
         # 12 months ≈ 365 days; backfill_months * 30 keeps things simple and bounded.
-        start = end - timedelta(days=self.backfill_months * 30)
+        span = months if months is not None else self.backfill_months
+        start = end - timedelta(days=span * 30)
         await self._fetch_window(start, end, write_stats=True, force_start=True)
         await self.async_ensure_baselines()
         await self._flush_baselines_if_dirty()
@@ -259,6 +277,11 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         user already sees on the Energy dashboard. Re-fetching would let
         Estfeed's still-settling recent intervals drift the cost away from the
         published energy — the bug this method exists to avoid.
+
+        Rows are chained onto the cumulative ``sum`` of the last existing row
+        before the window start, so a rebuild over a window shorter than the
+        existing history keeps the sum column monotonic (a restart-at-zero
+        would read as a counter rollback on the Energy dashboard).
         """
         if not self.meters or self._nps is None:
             return
@@ -271,19 +294,20 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         end = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0)
         start = end - timedelta(days=self.backfill_months * 30)
 
-        # Warm the price cache one bounded chunk at a time — a single 360-day
-        # request would return ~35k quarter rows and risk an Elering timeout.
-        cursor = start
-        while cursor < end:
-            chunk_end = min(cursor + timedelta(days=MAX_DAYS_PER_REQUEST), end)
-            try:
-                await self._nps.async_get_prices(cursor, chunk_end)
-                self.last_nps_error = None
-            except NpsError as err:
-                self.last_nps_error = str(err)
-                _LOGGER.warning("NPS fetch failed for %s..%s: %s", cursor, chunk_end, err)
-            cursor = chunk_end
-        prices = await self._nps.async_get_prices(start, end)  # all served from cache
+        # The client chunks the fetch internally (≤31 days per request) so a
+        # single call here cannot trigger a months-spanning request. A total
+        # failure aborts the rebuild: writing a partially-priced series would
+        # advance latest_seen past the unpriced gap, which later ticks cannot
+        # backfill. Re-running the rebuild (re-save options) retries cleanly.
+        try:
+            prices = await self._nps.async_get_prices(start, end)
+            self.last_nps_error = None
+        except NpsError as err:
+            self.last_nps_error = str(err)
+            _LOGGER.warning(
+                "NPS fetch failed for %s..%s, aborting cost rebuild: %s", start, end, err
+            )
+            return
 
         for meter in self.meters:
             cost_streams = self.cost_streams_for(meter)
@@ -295,13 +319,14 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
                 if energy_id is None:
                     continue
                 hourly_energy = await self._hourly_energy_from_stats(energy_id, start, end)
+                prior_sum = await self._sum_before_window(cstream.statistic_id, start, end)
                 await async_write_cost_statistics_from_hourly(
                     self.hass,
                     cstream,
                     hourly_energy,
                     prices,
                     tariff,
-                    prior_sum=0.0,
+                    prior_sum=prior_sum,
                 )
         self.async_update_listeners()
 
@@ -335,6 +360,38 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
             )
             result[hour] = float(change)
         return result
+
+    async def _sum_before_window(self, statistic_id: str, start: datetime, end: datetime) -> float:
+        """Cumulative ``sum`` of the last row at or before ``start``.
+
+        Rebuilds over a sub-window must chain onto the sum the series
+        already had at the window start; restarting from 0 would create a
+        mid-series drop that HA reads as a counter rollback. Computed as
+        ``latest_sum - sum of change[start, end)`` so both queries stay bounded
+        by the rebuild window itself (no scan from the beginning of
+        history). Exact for continuous series; degrades gracefully to 0.0
+        when no statistics exist at all (fresh install).
+        """
+        last_stats = await get_instance(self.hass).async_add_executor_job(
+            get_last_statistics, self.hass, 1, statistic_id, True, {"sum"}
+        )
+        rows = last_stats.get(statistic_id)
+        if not rows:
+            return 0.0
+        latest_sum = float(rows[0].get("sum") or 0.0)
+        changes = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            start,
+            end,
+            {statistic_id},
+            "hour",
+            None,
+            {"change"},
+        )
+        return latest_sum - sum(
+            float(row.get("change") or 0.0) for row in changes.get(statistic_id, [])
+        )
 
     async def async_warm_cache(self) -> None:
         """Populate the rolling 62-day cache after a restart.
@@ -409,14 +466,19 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         # synchronously, so re-reading get_last_statistics inside the loop
         # would risk seeing stale data for chunk N+1 after chunk N's write.
         # force_start callers (initial backfill, manual rebuild service) want
-        # to rebuild history from scratch — chaining off the current latest
-        # sum would offset every historical bucket by whatever the cumulative
-        # happens to be right now. Reset to 0.0 so the rewrite is clean.
+        # to rewrite history for the requested window — chaining off the
+        # *current latest* sum would offset every bucket by whatever the
+        # cumulative happens to be right now. Instead, seed from the sum the
+        # series had just before the window start (0.0 on a fresh install):
+        # rewritten rows stay consistent with any older rows outside the
+        # window and the sum column never drops mid-series.
         prior_sums: dict[str, float] = {}
         if write_stats:
             for stream in streams:
                 prior_sums[stream.statistic_id] = (
-                    0.0 if force_start else await self._prior_sum_for_stream(stream)
+                    await self._sum_before_window(stream.statistic_id, start, end)
+                    if force_start
+                    else await self._prior_sum_for_stream(stream)
                 )
         # Per-cost-stream resume points and prior sums (electricity only).
         # Skip the reads entirely when no NPS client is attached — cost writes
@@ -440,7 +502,9 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
                     None if force_start else await self._latest_seen_for_stream(fake)
                 )
                 cost_prior_sums[cstream.statistic_id] = (
-                    0.0 if force_start else await self._prior_sum_for_stream(fake)
+                    await self._sum_before_window(cstream.statistic_id, start, end)
+                    if force_start
+                    else await self._prior_sum_for_stream(fake)
                 )
         tariff = self._build_tariff() if cost_streams else None
         cursor = fetch_start
@@ -452,6 +516,14 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
             # Fetch prices for this chunk once if any cost stream needs them.
             prices: dict[datetime, float] | None = None
             if write_stats and cost_streams and self._nps is not None:
+                # Evict hours whose NPS quarters may still be settling so
+                # they are re-fetched with complete data — without this, an
+                # hour first priced mid-settlement keeps its partial-quarter
+                # mean for the process lifetime (the failure mode clear_cache
+                # exists for, applied to the regular tick path).
+                self._nps.evict_after(
+                    datetime.now(tz=UTC) - timedelta(hours=NPS_PRICE_SETTLE_HOURS)
+                )
                 try:
                     prices = await self._nps.async_get_prices(cursor, chunk_end)
                     self.last_nps_error = None
@@ -572,7 +644,7 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
             # lose data once a long-running baseline pushes past 62 days.
             if baseline is None or expiring.period_start < baseline.reset_at:
                 continue
-            value = _interval_value(expiring, kind)
+            value = interval_value(expiring, kind)
             if value is None:
                 continue
             self.baselines[(eic, kind)] = CumulativeBaseline(
@@ -597,7 +669,7 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         for ival in self.cache.get((eic, kind), ()):
             if ival.period_start < baseline.reset_at:
                 continue
-            value = _interval_value(ival, kind)
+            value = interval_value(ival, kind)
             if value is None:
                 continue
             total += float(value)

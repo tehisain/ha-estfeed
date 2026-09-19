@@ -19,7 +19,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .api import AccountingInterval, MeteringPoint
+from .api import AccountingInterval, MeteringPoint, interval_value
 from .const import ATTRIBUTION, DOMAIN, CommodityType, Kind
 from .coordinator import EstfeedCoordinator
 from .statistics import eic_suffix
@@ -56,12 +56,6 @@ def window_for_period(
     raise ValueError(f"unknown period: {period}")
 
 
-def _interval_value(ival: AccountingInterval, kind: Kind) -> float | None:
-    if kind == Kind.CONSUMPTION:
-        return ival.consumption_kwh if ival.consumption_kwh is not None else ival.consumption_m3
-    return ival.production_kwh if ival.production_kwh is not None else ival.production_m3
-
-
 def sum_for_period(
     intervals: list[AccountingInterval] | deque[AccountingInterval],
     kind: Kind,
@@ -77,7 +71,7 @@ def sum_for_period(
     total = 0.0
     for ival in intervals:
         if start_utc <= ival.period_start < end_utc:
-            v = _interval_value(ival, kind)
+            v = interval_value(ival, kind)
             if v is not None:
                 total += float(v)
     return total

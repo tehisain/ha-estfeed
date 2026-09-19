@@ -39,7 +39,7 @@ For electricity meters, the integration also publishes two derived external stat
 - `estfeed:<your_name>_cost_<eic_suffix>` — cumulative cost of consumed energy
 - `estfeed:<your_name>_compensation_<eic_suffix>` — cumulative compensation for produced energy
 
-Both are computed by multiplying each hour's consumption/production by the matching Nord Pool spot price for the EE bidding zone (fetched from the Elering NPS API), then applying a configurable tariff: `spot × (1 + VAT%/100) + margin`. Defaults: VAT 22 %, margin 0 €/kWh — adjust in the integration options.
+Both are computed by multiplying each hour's consumption/production by the matching Nord Pool spot price for the EE bidding zone (fetched from the Elering NPS API), then applying a configurable tariff: `spot × (1 + VAT%/100) + margin`. Defaults: VAT 22 %, margin 0 €/kWh — adjust in the integration options. Prices are denominated in **EUR** (the NPS API's native currency); the statistics are labelled EUR regardless of your Home Assistant currency setting.
 
 To wire them into the Energy dashboard:
 
@@ -66,12 +66,15 @@ For each metering point:
 
 ## Services
 
-- `estfeed.backfill_history(months=24, entry_id=<uuid>)` — re-fetch and re-publish the last N months of statistics. Idempotent.
+- `estfeed.backfill_history(months=24, entry_id=<uuid>)` — re-fetch and re-publish the last N months of statistics. Rebuilds chain onto the cumulative sum at the window start, so history outside the window stays consistent.
+- `estfeed.set_cumulative_reset_at(reset_at=..., entry_id=<uuid>)` — move the cumulative-since-reset baseline to a specific timestamp (e.g. to restore a previous anchor after an accidental reset). Restores both consumption and production baselines.
 
 ## Limitations
 
 - Not real-time: hours need to settle before their kWh value is final (see the note at the top).
-- Cost calculation is intentionally not included; use HA's built-in Energy Dashboard cost configuration with a price entity.
+- Cost/compensation statistics are a spot-price estimate (`spot × (1 + VAT%) + margin`); network fees, renewable levies and time-windowed margins are not modelled. For anything fancier, unpair the cost statistic and use HA's built-in Energy cost configuration instead.
+- Cost statistics are denominated in EUR (NPS prices are EUR; no conversion is applied).
+- The cumulative-since-reset sensor recomputes from a 62-day rolling cache plus a frozen sum; if Home Assistant is offline for more than ~62 days, consumption from the outage window beyond those 62 days is not recovered into the cumulative total.
 - API rate limit: 1 request per 5 seconds (per API key) — handled internally.
 
 ## Development

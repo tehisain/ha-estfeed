@@ -109,6 +109,74 @@ async def test_user_step_bad_credentials_shows_form_error(hass):
 
 
 @pytest.mark.asyncio
+async def test_user_step_rejects_colliding_friendly_name(hass):
+    """Entity unique_ids and statistic_ids derive from the slugified friendly
+    name; a second entry whose name slugifies identically would silently
+    collide. The flow must reject it with slug_in_use."""
+    await _setup_recorder(hass)
+    existing = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CLIENT_ID: "one", CONF_CLIENT_SECRET: "s", CONF_FRIENDLY_NAME: "My Home"},
+        unique_id="one",
+    )
+    existing.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+
+    with patch(
+        "custom_components.estfeed.config_flow.EstfeedClient.list_metering_points",
+        new=AsyncMock(return_value=[_meter()]),
+    ):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            # Different API key, but "my home" slugifies to the same "my_home".
+            user_input={
+                CONF_CLIENT_ID: "two",
+                CONF_CLIENT_SECRET: "s2",
+                CONF_FRIENDLY_NAME: "my HOME",
+            },
+        )
+
+    assert result2["type"] == FlowResultType.FORM
+    assert result2["errors"] == {"base": "slug_in_use"}
+
+
+@pytest.mark.asyncio
+async def test_user_step_accepts_same_entry_updating_name(hass):
+    """Re-validating with the same client_id (unique_id match) aborts via
+    already_configured before the slug check can false-positive."""
+    await _setup_recorder(hass)
+    existing = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CLIENT_ID: "one", CONF_CLIENT_SECRET: "s", CONF_FRIENDLY_NAME: "Home"},
+        unique_id="one",
+    )
+    existing.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+
+    with patch(
+        "custom_components.estfeed.config_flow.EstfeedClient.list_metering_points",
+        new=AsyncMock(return_value=[_meter()]),
+    ):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_CLIENT_ID: "one",
+                CONF_CLIENT_SECRET: "s",
+                CONF_FRIENDLY_NAME: "Home",
+            },
+        )
+
+    assert result2["type"] == FlowResultType.ABORT
+    assert result2["reason"] == "already_configured"
+
+
+@pytest.mark.asyncio
 async def test_reauth_flow_replaces_credentials(hass):
     await _setup_recorder(hass)
     entry = MockConfigEntry(

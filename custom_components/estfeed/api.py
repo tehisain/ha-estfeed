@@ -23,6 +23,7 @@ from .const import (
     REQUEST_TIMEOUT_SECONDS,
     TOKEN_REFRESH_MARGIN_SECONDS,
     CommodityType,
+    Kind,
     Resolution,
 )
 
@@ -87,6 +88,21 @@ class AccountingInterval:
             consumption_m3=raw.get("consumptionM3"),
             production_m3=raw.get("productionM3"),
         )
+
+
+def interval_value(interval: AccountingInterval, kind: Kind) -> float | None:
+    """Return the kWh/m³ value for a kind, falling back across units.
+
+    Single canonical implementation shared by the coordinator, statistics
+    writer, pricing helpers, and sensors.
+    """
+    if kind == Kind.CONSUMPTION:
+        if interval.consumption_kwh is not None:
+            return interval.consumption_kwh
+        return interval.consumption_m3
+    if interval.production_kwh is not None:
+        return interval.production_kwh
+    return interval.production_m3
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,7 +229,7 @@ class EstfeedClient:
         except TimeoutError as err:
             raise EstfeedTimeoutError(str(err)) from err
         except aiohttp.ClientError as err:
-            raise EstfeedTimeoutError(str(err)) from err
+            raise EstfeedConnectionError(str(err)) from err
 
         if status == 200:
             return payload
@@ -293,4 +309,8 @@ class EstfeedAPIError(EstfeedError):
 
 
 class EstfeedTimeoutError(EstfeedError):
-    """Network timeout or connection error."""
+    """Network timeout."""
+
+
+class EstfeedConnectionError(EstfeedError):
+    """Connection-level failure (DNS, TLS, reset, malformed response body)."""

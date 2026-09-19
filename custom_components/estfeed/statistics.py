@@ -11,7 +11,7 @@ from homeassistant.components.recorder.models import StatisticData, StatisticMet
 from homeassistant.components.recorder.statistics import async_add_external_statistics
 from homeassistant.core import HomeAssistant
 
-from .api import AccountingInterval
+from .api import AccountingInterval, interval_value
 from .const import DOMAIN, Kind
 from .pricing import compute_cost_rows, compute_cost_rows_from_hourly
 
@@ -58,18 +58,6 @@ def build_statistic_id(slug: str, kind: Kind, suffix: str, *, multi_meter: bool)
     return f"{DOMAIN}:{slug}_{kind.value}_{suffix}"
 
 
-def _interval_value(interval: AccountingInterval, kind: Kind) -> float | None:
-    if kind == Kind.CONSUMPTION:
-        return (
-            interval.consumption_kwh
-            if interval.consumption_kwh is not None
-            else interval.consumption_m3
-        )
-    return (
-        interval.production_kwh if interval.production_kwh is not None else interval.production_m3
-    )
-
-
 def compute_statistic_rows(
     intervals: list[AccountingInterval],
     kind: Kind,
@@ -87,7 +75,7 @@ def compute_statistic_rows(
     # Aggregate values into hourly buckets keyed by snapped start.
     hourly: dict[Any, float] = {}
     for ival in intervals:
-        value = _interval_value(ival, kind)
+        value = interval_value(ival, kind)
         if value is None:
             continue
         bucket = ival.period_start.replace(minute=0, second=0, microsecond=0)

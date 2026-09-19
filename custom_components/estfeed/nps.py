@@ -16,6 +16,15 @@ import aiohttp
 
 NPS_PRICE_URL = "https://dashboard.elering.ee/api/nps/price"
 NPS_TIMEOUT_SECONDS = 30
+# One request per at most 31 days — a single 360-day request returns ~35k
+# quarter rows and risks an Elering timeout.
+NPS_MAX_FETCH_DAYS = 31
+# Hours whose NPS quarters may not all be settled yet. Elering publishes
+# 15-min prices progressively; an hour fetched inside this horizon may only
+# have a subset of its quarters available, and the hourly mean computed from
+# that subset would be wrong. Hours newer than this horizon must be evicted
+# from the cache before each fetch so they are re-priced once complete.
+NPS_PRICE_SETTLE_HOURS = 2
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,6 +58,18 @@ class EleringNpsClient:
         never refreshed) cannot poison the rewrite.
         """
         self._cache.clear()
+
+    def evict_after(self, cutoff: datetime) -> None:
+        """Drop cached hours at or after ``cutoff`` (UTC).
+
+        Called by the coordinator's regular tick before fetching prices so
+        recent hours whose 15-min quarters were still settling at first
+        fetch get re-fetched (and re-meaned) once all quarters are
+        published. Without this, a partial-quarter mean cached on tick N
+        would price that hour forever.
+        """
+        cutoff = cutoff.astimezone(UTC)
+        self._cache = {hour: price for hour, price in self._cache.items() if hour < cutoff}
 
     def cache_snapshot(self, hours: list[datetime]) -> dict[str, float | None]:
         """Return cached EUR/kWh prices for the given hours, keyed by ISO string.
@@ -86,6 +107,19 @@ class EleringNpsClient:
         return {h: self._cache[h] for h in wanted if h in self._cache}
 
     async def _fetch_range(self, start: datetime, end: datetime) -> None:
+        """Fetch [start, end) in bounded chunks, merging into the cache.
+
+        Chunking lives inside the client so no caller can accidentally
+        issue a single request spanning months of quarter-hour rows. Chunks
+        fetched before a failure remain cached.
+        """
+        cursor = start
+        while cursor < end:
+            chunk_end = min(cursor + timedelta(days=NPS_MAX_FETCH_DAYS), end)
+            await self._fetch_chunk(cursor, chunk_end)
+            cursor = chunk_end
+
+    async def _fetch_chunk(self, start: datetime, end: datetime) -> None:
         params = {
             "start": start.isoformat().replace("+00:00", "Z"),
             "end": end.isoformat().replace("+00:00", "Z"),

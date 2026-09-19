@@ -20,7 +20,8 @@
     },
     "error": {
       "invalid_auth": "Invalid client_id or client_secret",
-      "cannot_connect": "Could not reach the Estfeed API"
+      "cannot_connect": "Could not reach the Estfeed API",
+      "slug_in_use": "Another Estfeed entry already uses this friendly name"
     },
     "abort": {
       "already_configured": "This API key is already configured"
@@ -72,9 +73,9 @@
     },
     "set_cumulative_reset_at": {
       "name": "Set cumulative reset_at",
-      "description": "Move the cumulative-since-reset baseline to a specific timestamp (e.g. to restore a previous anchor).",
+      "description": "Move the cumulative-since-reset baseline to a specific timestamp (e.g. to restore a previous anchor). Restores both consumption and production baselines.",
       "fields": {
-        "reset_at": { "name": "Reset at", "description": "New anchor timestamp. The cumulative sensor will sum intervals from this moment forward." },
+        "reset_at": { "name": "Reset at", "description": "New anchor timestamp. The cumulative sensors will sum intervals from this moment forward." },
         "entry_id": { "name": "Config entry", "description": "Which Estfeed config entry to update." }
       }
     }

@@ -33,6 +33,7 @@ from .const import (
     MIN_BACKFILL_MONTHS,
     Resolution,
 )
+from .utils import slugify
 
 _USER_SCHEMA = vol.Schema(
     {
@@ -48,6 +49,20 @@ class EstfeedConfigFlow(ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    def _slug_in_use(self, slug: str) -> bool:
+        """True if another entry's friendly name slugifies to ``slug``.
+
+        Entity unique_ids and statistic_ids are derived from the slug, so a
+        collision would silently merge two entries' entities/statistics.
+        Config-flow uniqueness is per client_id, so names must be checked
+        separately across ALL entries of the domain (not just those sharing
+        this flow's unique_id).
+        """
+        for entry in self.hass.config_entries.async_entries(DOMAIN):
+            if slugify(entry.data.get(CONF_FRIENDLY_NAME, entry.title)) == slug:
+                return True
+        return False
+
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle the initial step where the user enters API credentials."""
         errors: dict[str, str] = {}
@@ -59,11 +74,17 @@ class EstfeedConfigFlow(ConfigFlow, domain=DOMAIN):
             except EstfeedError:
                 errors["base"] = "cannot_connect"
             else:
+                # unique_id (client_id) abort must run before the slug check
+                # so re-adding an existing key aborts instead of tripping
+                # over its own friendly name.
                 await self.async_set_unique_id(user_input[CONF_CLIENT_ID])
                 self._abort_if_unique_id_configured()
-                return self.async_create_entry(
-                    title=user_input[CONF_FRIENDLY_NAME], data=user_input
-                )
+                if self._slug_in_use(slugify(user_input[CONF_FRIENDLY_NAME])):
+                    errors["base"] = "slug_in_use"
+                else:
+                    return self.async_create_entry(
+                        title=user_input[CONF_FRIENDLY_NAME], data=user_input
+                    )
 
         return self.async_show_form(step_id="user", data_schema=_USER_SCHEMA, errors=errors)
 

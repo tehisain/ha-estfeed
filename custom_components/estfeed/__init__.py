@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from datetime import UTC, datetime, timedelta
 
 import voluptuous as vol
@@ -19,7 +18,6 @@ from homeassistant.helpers.storage import Store
 
 from .api import EstfeedClient, EstfeedError
 from .const import (
-    CONF_BACKFILL_MONTHS,
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
     CONF_FRIENDLY_NAME,
@@ -32,6 +30,7 @@ from .const import (
 )
 from .coordinator import EstfeedCoordinator
 from .nps import EleringNpsClient
+from .utils import slugify
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -58,10 +57,6 @@ SERVICE_SET_CUMULATIVE_RESET_AT_SCHEMA = vol.Schema(
 )
 
 
-def _slugify(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "estfeed"
-
-
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Estfeed from a config entry."""
     session = async_get_clientsession(hass)
@@ -70,7 +65,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         client_id=entry.data[CONF_CLIENT_ID],
         client_secret=entry.data[CONF_CLIENT_SECRET],
     )
-    slug = _slugify(entry.data.get(CONF_FRIENDLY_NAME, entry.title))
+    slug = slugify(entry.data.get(CONF_FRIENDLY_NAME, entry.title))
 
     end = datetime.now(tz=UTC)
     start = end - timedelta(days=7)
@@ -80,7 +75,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryNotReady(str(err)) from err
 
     coordinator = EstfeedCoordinator(
-        hass=hass, client=client, slug=slug, options={**entry.data, **entry.options}
+        hass=hass,
+        client=client,
+        slug=slug,
+        options={**entry.data, **entry.options},
+        config_entry=entry,
     )
     coordinator.meters = meters
     coordinator.attach_nps_client(EleringNpsClient(session))
@@ -174,14 +173,14 @@ def _async_register_services(hass: HomeAssistant) -> None:
             else list(hass.data.get(DOMAIN, {}).values())
         )
         for coord in targets:
-            coord.options = {**coord.options, CONF_BACKFILL_MONTHS: months}
-            await coord.async_initial_backfill()
+            # Pass months explicitly instead of mutating coord.options —
+            # an in-memory override would be silently reverted the next
+            # time the options flow saves.
+            await coord.async_initial_backfill(months=months)
 
     hass.services.async_register(DOMAIN, SERVICE_BACKFILL, _handle, schema=SERVICE_BACKFILL_SCHEMA)
 
     async def _set_reset_at(call: ServiceCall) -> None:
-        from .const import Kind  # local import — avoids cycling const into top of __init__
-
         reset_at = call.data["reset_at"]
         if reset_at.tzinfo is None:
             reset_at = reset_at.replace(tzinfo=UTC)
@@ -192,7 +191,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
             else list(hass.data.get(DOMAIN, {}).values())
         )
         for coord in targets:
-            await coord.async_set_cumulative_reset_at(reset_at, kinds=(Kind.CONSUMPTION,))
+            # Restore both consumption and production baselines so the
+            # anchor rewind is symmetric with how baselines are captured.
+            await coord.async_set_cumulative_reset_at(reset_at)
 
     hass.services.async_register(
         DOMAIN,

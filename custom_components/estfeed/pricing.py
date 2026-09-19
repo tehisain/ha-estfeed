@@ -8,7 +8,7 @@ from typing import Any
 
 from homeassistant.components.recorder.models import StatisticData
 
-from .api import AccountingInterval
+from .api import AccountingInterval, interval_value
 from .const import Kind
 
 
@@ -34,17 +34,6 @@ def make_tariff(
     return lambda spot: apply_tariff(spot, vat_percent, margin_eur_per_kwh)
 
 
-def _interval_value(interval: AccountingInterval, kind: Kind) -> float | None:
-    """Pick the relevant kWh/m³ field for a given kind (mirrors statistics.py)."""
-    if kind == Kind.CONSUMPTION:
-        if interval.consumption_kwh is not None:
-            return interval.consumption_kwh
-        return interval.consumption_m3
-    if interval.production_kwh is not None:
-        return interval.production_kwh
-    return interval.production_m3
-
-
 def compute_cost_rows(
     intervals: list[AccountingInterval],
     kind: Kind,
@@ -61,7 +50,7 @@ def compute_cost_rows(
     """
     hourly: dict[Any, float] = {}
     for ival in intervals:
-        value = _interval_value(ival, kind)
+        value = interval_value(ival, kind)
         if value is None:
             continue
         bucket = ival.period_start.replace(minute=0, second=0, microsecond=0)

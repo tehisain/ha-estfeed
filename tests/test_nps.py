@@ -179,3 +179,51 @@ async def test_async_get_prices_cache_size_property(session):
             datetime(2026, 5, 21, 3, tzinfo=UTC),
         )
         assert client.cache_size == 3
+
+
+@pytest.mark.asyncio
+async def test_evict_after_drops_only_recent_hours(session):
+    """Regression: an hour cached mid-settlement keeps a partial-quarter mean
+    for the process lifetime. evict_after must drop exactly the hours at or
+    after the cutoff so the next async_get_prices re-fetches them complete."""
+    raw = {datetime(2026, 5, 21, h, tzinfo=UTC): 50.0 for h in range(4)}
+    with aioresponses() as m:
+        m.get(NPS_URL_RE, payload=_stub_response(raw))
+        client = EleringNpsClient(session)
+        await client.async_get_prices(
+            datetime(2026, 5, 21, 0, tzinfo=UTC),
+            datetime(2026, 5, 21, 4, tzinfo=UTC),
+        )
+        assert client.cache_size == 4
+
+        client.evict_after(datetime(2026, 5, 21, 2, tzinfo=UTC))
+        assert client.cache_size == 2
+
+        # Re-requesting the evicted hours hits the network again with the
+        # now-complete quarter data and overwrites the partial means.
+        updated = {
+            datetime(2026, 5, 21, 2, tzinfo=UTC): 70.0,
+            datetime(2026, 5, 21, 3, tzinfo=UTC): 70.0,
+        }
+        m.get(NPS_URL_RE, payload=_stub_response(updated))
+        prices = await client.async_get_prices(
+            datetime(2026, 5, 21, 0, tzinfo=UTC),
+            datetime(2026, 5, 21, 4, tzinfo=UTC),
+        )
+    assert prices[datetime(2026, 5, 21, 0, tzinfo=UTC)] == pytest.approx(0.050)
+    assert prices[datetime(2026, 5, 21, 3, tzinfo=UTC)] == pytest.approx(0.070)
+
+
+@pytest.mark.asyncio
+async def test_async_get_prices_chunks_long_ranges(session):
+    """A months-spanning gap must be fetched in ≤31-day requests — a single
+    request returns ~35k quarter rows and risks an Elering timeout."""
+    start = datetime(2026, 1, 1, 0, tzinfo=UTC)
+    end = datetime(2026, 3, 12, 0, tzinfo=UTC)  # 70 days → 3 chunks
+    with aioresponses() as m:
+        # One stub per expected chunk; a fourth call would raise (no match).
+        for _ in range(3):
+            m.get(NPS_URL_RE, payload=_stub_response({}))
+        client = EleringNpsClient(session)
+        await client.async_get_prices(start, end)
+    assert sum(len(v) for v in m.requests.values()) == 3

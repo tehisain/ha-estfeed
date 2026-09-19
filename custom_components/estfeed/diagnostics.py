@@ -27,9 +27,7 @@ async def async_get_config_entry_diagnostics(
     # whether the bug is in the fetch path (mean mis-computed) or downstream.
     now_hour = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0)
     sample_hours = [now_hour - timedelta(hours=h) for h in range(36)]
-    nps_cache_recent = (
-        coordinator._nps.cache_snapshot(sample_hours) if coordinator._nps is not None else {}
-    )
+    nps_cache_recent = coordinator.nps_cache_snapshot(sample_hours)
     return {
         "entry": {
             "title": entry.title,

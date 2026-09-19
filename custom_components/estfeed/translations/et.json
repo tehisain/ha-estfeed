@@ -20,7 +20,8 @@
     },
     "error": {
       "invalid_auth": "Vale client_id või client_secret",
-      "cannot_connect": "Estfeed API-le ei õnnestu ühenduda"
+      "cannot_connect": "Estfeed API-le ei õnnestu ühenduda",
+      "slug_in_use": "Teine Estfeedi kirje kasutab juba seda nime"
     },
     "abort": {
       "already_configured": "See API võti on juba seadistatud"
@@ -72,9 +73,9 @@
     },
     "set_cumulative_reset_at": {
       "name": "Määra kumulatiivse lähtestus",
-      "description": "Liiguta kumulatiivse arvesti algushetk soovitud ajale (nt taasta varasem ankur).",
+      "description": "Liiguta kumulatiivse arvesti algushetk soovitud ajale (nt taasta varasem ankur). Taastab nii tarbimise kui tootmise baasjooned.",
       "fields": {
-        "reset_at": { "name": "Lähtestus", "description": "Uus algushetk. Kumulatiivne sensor summeerib intervallid alates sellest hetkest." },
+        "reset_at": { "name": "Lähtestus", "description": "Uus algushetk. Kumulatiivsed sensorid summeerivad intervallid alates sellest hetkest." },
         "entry_id": { "name": "Konfig kirje", "description": "Millise Estfeed kirje algushetk uuendada." }
       }
     }
