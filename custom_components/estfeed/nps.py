@@ -143,15 +143,30 @@ class EleringNpsClient:
         # writing each row directly would let the last :45 quarter overwrite
         # the others and badly mis-represent volatile hours.
         rows = (payload or {}).get("data", {}).get("ee", [])
-        buckets: dict[datetime, list[float]] = {}
+        end_ts = end.timestamp()
+        buckets: dict[datetime, list[tuple[int, float]]] = {}
         for row in rows:
             ts = row.get("timestamp")
             price_eur_per_mwh = row.get("price")
             if ts is None or price_eur_per_mwh is None:
                 continue
-            hour = datetime.fromtimestamp(int(ts), tz=UTC).replace(
-                minute=0, second=0, microsecond=0
-            )
-            buckets.setdefault(hour, []).append(float(price_eur_per_mwh))
-        for hour, prices in buckets.items():
+            ts = int(ts)
+            # Elering treats ``end`` as inclusive and returns the quarter that
+            # starts exactly there. Every hourly tick asks for prices up to the
+            # current hour, so without this the current hour was cached as a
+            # one-quarter mean and, being "known", never fetched again; the
+            # cost of that hour was then priced off a single quarter.
+            if ts >= end_ts:
+                continue
+            at = datetime.fromtimestamp(ts, tz=UTC)
+            hour = at.replace(minute=0, second=0, microsecond=0)
+            buckets.setdefault(hour, []).append((at.minute, float(price_eur_per_mwh)))
+        for hour, quarters in buckets.items():
+            # An hour of quarter data with quarters missing is incomplete; leave
+            # it out of the cache so the next call fetches it again. Hourly-era
+            # data (before the 15-min switch) has one row at :00 and is complete.
+            has_quarters = any(minute != 0 for minute, _ in quarters)
+            if has_quarters and len(quarters) < 4:
+                continue
+            prices = [p for _, p in quarters]
             self._cache[hour] = (sum(prices) / len(prices)) / 1000.0

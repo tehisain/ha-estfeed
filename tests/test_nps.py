@@ -227,3 +227,50 @@ async def test_async_get_prices_chunks_long_ranges(session):
         client = EleringNpsClient(session)
         await client.async_get_prices(start, end)
     assert sum(len(v) for v in m.requests.values()) == 3
+
+
+def _quarters(hour: datetime, prices: list[float]) -> dict[datetime, float]:
+    return {hour + timedelta(minutes=15 * i): p for i, p in enumerate(prices)}
+
+
+@pytest.mark.asyncio
+async def test_quarter_at_inclusive_end_is_not_cached(session):
+    """Elering returns the row that starts exactly at ``end``; caching it
+    would store the next hour as a one-quarter mean that is never refreshed."""
+    h0 = datetime(2026, 9, 13, 14, tzinfo=UTC)
+    h1 = h0 + timedelta(hours=1)
+    h2 = h0 + timedelta(hours=2)
+    raw = _quarters(h0, [20.0, 20.0, 20.0, 20.0]) | _quarters(h1, [40.0, 40.0, 40.0, 40.0])
+    raw[h2] = 24.63  # the leaked quarter at end
+    with aioresponses() as m:
+        m.get(NPS_URL_RE, payload=_stub_response(raw))
+        client = EleringNpsClient(session)
+        prices = await client.async_get_prices(h0, h2)
+    assert prices == {h0: pytest.approx(0.020), h1: pytest.approx(0.040)}
+    assert client.cache_size == 2
+
+
+@pytest.mark.asyncio
+async def test_incomplete_quarter_hour_is_fetched_again(session):
+    h0 = datetime(2026, 9, 13, 12, tzinfo=UTC)
+    h1 = h0 + timedelta(hours=1)
+    partial = _quarters(h0, [20.0, 20.0, 20.0, 20.0]) | _quarters(h1, [15.87, 18.82, 16.24])
+    complete = _quarters(h1, [15.87, 18.82, 16.24, 89.96])
+    with aioresponses() as m:
+        m.get(NPS_URL_RE, payload=_stub_response(partial))
+        m.get(NPS_URL_RE, payload=_stub_response(complete))
+        client = EleringNpsClient(session)
+        first = await client.async_get_prices(h0, h1 + timedelta(hours=1))
+        second = await client.async_get_prices(h0, h1 + timedelta(hours=1))
+    assert first == {h0: pytest.approx(0.020)}
+    assert second == {h0: pytest.approx(0.020), h1: pytest.approx(0.0352225)}
+
+
+@pytest.mark.asyncio
+async def test_hourly_era_single_row_is_complete(session):
+    h0 = datetime(2025, 5, 21, 0, tzinfo=UTC)
+    with aioresponses() as m:
+        m.get(NPS_URL_RE, payload=_stub_response({h0: 50.0, h0 + timedelta(hours=1): 45.0}))
+        client = EleringNpsClient(session)
+        prices = await client.async_get_prices(h0, h0 + timedelta(hours=2))
+    assert prices == {h0: pytest.approx(0.050), h0 + timedelta(hours=1): pytest.approx(0.045)}
