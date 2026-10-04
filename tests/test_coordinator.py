@@ -124,9 +124,13 @@ async def test_coordinator_uses_latest_seen_as_start(hass, freezer):
     )
     coordinator.meters = [_make_meter()]
 
-    last_seen_ts = datetime(2026, 4, 28, 23, tzinfo=UTC).timestamp()
+    # Inside the tick's 30-day window so the resume point, not the window
+    # start, wins. get_last_statistics reports start/end in epoch seconds.
+    last_seen = (datetime.now(tz=UTC) - timedelta(days=2)).replace(
+        minute=0, second=0, microsecond=0
+    )
     fake_last_stats = {
-        "estfeed:home_consumption_089n": [{"end": last_seen_ts * 1000}],  # ms
+        "estfeed:home_consumption_089n": [{"end": last_seen.timestamp()}],
     }
 
     with (
@@ -149,7 +153,24 @@ async def test_coordinator_uses_latest_seen_as_start(hass, freezer):
     # stored row's `end` equals the next bucket's `start`, so adding an
     # extra hour would skip a bucket.
     args, _ = client.get_metering_data.call_args
-    assert args[0] == datetime(2026, 4, 28, 23, tzinfo=UTC)
+    assert args[0] == last_seen
+
+
+async def test_latest_seen_reads_end_as_epoch_seconds(hass):
+    """Regression: `end` from get_last_statistics is seconds; treating it as
+    milliseconds put the resume point in 1970 and every tick re-wrote the
+    whole window chained off the latest sum."""
+    coordinator = EstfeedCoordinator(hass=hass, client=MagicMock(), slug="home", options={})
+    end = datetime(2026, 9, 13, 12, tzinfo=UTC)
+    stream = coordinator.streams_for(_make_meter())[0]
+    with (
+        patch("custom_components.estfeed.coordinator.get_instance", return_value=_fake_recorder()),
+        patch(
+            "custom_components.estfeed.coordinator.get_last_statistics",
+            new=MagicMock(return_value={stream.statistic_id: [{"end": end.timestamp()}]}),
+        ),
+    ):
+        assert await coordinator._latest_seen_for_stream(stream) == end
 
 
 @pytest.mark.asyncio
@@ -580,14 +601,19 @@ def test_update_cache_dedupes_overlapping_writes(hass, freezer):
         options={},
     )
     eic = "38ZEE-00720089-N"
-    base = datetime(2026, 4, 7, 11, tzinfo=UTC)  # mimics first_refresh start
-    first_refresh_data = _hourly(base, 24 * 30)  # 30 days, Apr 7 - May 7
+    # Anchored to now: _update_cache trims anything older than the rolling
+    # window, so fixed dates silently drop out once the calendar moves on.
+    base = (datetime.now(tz=UTC) - timedelta(days=40)).replace(
+        hour=11, minute=0, second=0, microsecond=0
+    )  # mimics first_refresh start
+    first_refresh_data = _hourly(base, 24 * 30)  # 30 days
     coordinator._update_cache(eic, Kind.CONSUMPTION, first_refresh_data)
     assert len(coordinator.cache[(eic, Kind.CONSUMPTION)]) == 24 * 30
 
-    # Backfill chunk overlapping the start of first_refresh's window: Apr 1 - Apr 18.
-    # Apr 7 - Apr 18 overlaps; only Apr 1 - Apr 7 (144 hours) is genuinely new.
-    overlap_start = datetime(2026, 4, 1, 0, tzinfo=UTC)
+    # Backfill chunk overlapping the start of first_refresh's window: starts
+    # 6 days before base at midnight and runs 17 days. Only the leading
+    # 6 days + 11 hours (155 hours) are genuinely new.
+    overlap_start = base.replace(hour=0) - timedelta(days=6)
     backfill_chunk = _hourly(overlap_start, 24 * 17)
     coordinator._update_cache(eic, Kind.CONSUMPTION, backfill_chunk)
 
@@ -618,7 +644,9 @@ def test_update_cache_replaces_null_with_later_value(hass, freezer):
         options={},
     )
     eic = "38ZEE-00720089-N"
-    t = datetime(2026, 5, 16, 0, tzinfo=UTC)
+    t = (datetime.now(tz=UTC) - timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
     null_first = [
         AccountingInterval(
             period_start=t,

@@ -594,10 +594,16 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         rows = last_stats.get(stream.statistic_id)
         if not rows:
             return None
-        end_ms = rows[0].get("end")
-        if end_ms is None:
+        # ``start``/``end`` in get_last_statistics rows are epoch SECONDS (the
+        # recorder's start_ts plus the table period), not milliseconds like
+        # the websocket API's statistics_during_period. Dividing by 1000 put
+        # the threshold in 1970, so every tick treated the whole fetch window
+        # as new and re-wrote it chained off the latest sum: the cumulative
+        # series inflated by the window's total every hour.
+        end_s = rows[0].get("end")
+        if end_s is None:
             return None
-        return datetime.fromtimestamp(end_ms / 1000.0, tz=UTC)
+        return datetime.fromtimestamp(float(end_s), tz=UTC)
 
     async def _prior_sum_for_stream(self, stream: StatisticStream) -> float:
         last_stats = await get_instance(self.hass).async_add_executor_job(
