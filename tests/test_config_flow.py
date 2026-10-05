@@ -243,11 +243,13 @@ async def test_options_flow_persists_vat_and_margin(hass):
         "backfill_months": 12,
         CONF_VAT_PERCENT: 24.0,
         CONF_MARGIN_EUR_PER_KWH: 0.015,
+        "gas_price_eur_per_kwh": 0.055,
     }
     result = await hass.config_entries.options.async_configure(result["flow_id"], submission)
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_VAT_PERCENT] == 24.0
     assert entry.options[CONF_MARGIN_EUR_PER_KWH] == 0.015
+    assert entry.options["gas_price_eur_per_kwh"] == 0.055
 
 
 @pytest.mark.asyncio
@@ -269,3 +271,55 @@ async def test_options_flow_defaults_to_22_percent_vat_and_zero_margin(hass):
     }
     assert rendered[CONF_VAT_PERCENT] == DEFAULT_VAT_PERCENT
     assert rendered[CONF_MARGIN_EUR_PER_KWH] == DEFAULT_MARGIN_EUR_PER_KWH
+    # Gas cost is opt-in: 0 means no gas cost statistic.
+    assert rendered["gas_price_eur_per_kwh"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_options_flow_gas_mode_defaults_to_fixed_for_legacy_price(hass):
+    """Entries saved before the gas price mode existed had only a fixed price;
+    the form must preselect "fixed" so saving it keeps their gas cost."""
+    await _setup_recorder(hass)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CLIENT_ID: "x", CONF_CLIENT_SECRET: "y", CONF_FRIENDLY_NAME: "Home"},
+        options={"gas_price_eur_per_kwh": 0.0833},
+        unique_id="x",
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    rendered = {
+        k.schema: k.default()
+        for k in result["data_schema"].schema
+        if hasattr(k, "default") and hasattr(k, "schema")
+    }
+    assert rendered["gas_price_mode"] == "fixed"
+    assert rendered["gas_price_eur_per_kwh"] == 0.0833
+
+
+@pytest.mark.asyncio
+async def test_options_flow_persists_exchange_gas_mode_and_margin(hass):
+    await _setup_recorder(hass)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CLIENT_ID: "x", CONF_CLIENT_SECRET: "y", CONF_FRIENDLY_NAME: "Home"},
+        options={},
+        unique_id="x",
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            "resolution": "one_hour",
+            "backfill_months": 12,
+            CONF_VAT_PERCENT: 24.0,
+            CONF_MARGIN_EUR_PER_KWH: 0.0,
+            "gas_price_mode": "exchange",
+            "gas_price_eur_per_kwh": 0.0,
+            "gas_margin_eur_per_kwh": 0.0048,
+        },
+    )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert entry.options["gas_price_mode"] == "exchange"
+    assert entry.options["gas_margin_eur_per_kwh"] == 0.0048

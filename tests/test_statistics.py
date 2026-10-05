@@ -402,3 +402,26 @@ def test_compute_statistic_rows_aggregates_subhour_intervals():
     assert len(rows) == 1
     assert rows[0]["start"] == datetime(2026, 5, 2, 10, 0, tzinfo=UTC)
     assert rows[0]["sum"] == pytest.approx(1.0)
+
+
+def test_compute_statistic_rows_gas_uses_m3_not_kwh():
+    """Gas intervals carry both kWh and m³; an m³ stream must publish the m³
+    values (labelling kWh as m³ inflates the series ~10.6x)."""
+    intervals = [
+        AccountingInterval(
+            period_start=datetime(2026, 9, 28, 17, tzinfo=UTC),
+            consumption_kwh=5.539,
+            production_kwh=0.0,
+            consumption_m3=0.524,
+            production_m3=0.0,
+        ),
+        AccountingInterval(
+            period_start=datetime(2026, 9, 28, 18, tzinfo=UTC),
+            consumption_kwh=3.805,
+            production_kwh=0.0,
+            consumption_m3=0.36,
+            production_m3=0.0,
+        ),
+    ]
+    rows = compute_statistic_rows(intervals, Kind.CONSUMPTION, prior_sum=0.0, unit="m³")
+    assert [r["sum"] for r in rows] == pytest.approx([0.524, 0.884])

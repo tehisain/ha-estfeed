@@ -20,7 +20,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api import AccountingInterval, MeteringPoint, interval_value
-from .const import ATTRIBUTION, DOMAIN, CommodityType, Kind
+from .const import ATTRIBUTION, DOMAIN, UNIT_KWH, CommodityType, Kind, unit_for
 from .coordinator import EstfeedCoordinator
 from .statistics import eic_suffix
 
@@ -63,15 +63,16 @@ def sum_for_period(
     *,
     now: datetime,
     tz: ZoneInfo,
+    unit: str = UNIT_KWH,
 ) -> float:
-    """Sum kWh/m³ values that fall within the given local period."""
+    """Sum values (in ``unit``: kWh or m³) that fall within the given local period."""
     start_local, end_local = window_for_period(period, now=now, tz=tz)
     start_utc = start_local.astimezone(now.tzinfo or ZoneInfo("UTC"))
     end_utc = end_local.astimezone(now.tzinfo or ZoneInfo("UTC"))
     total = 0.0
     for ival in intervals:
         if start_utc <= ival.period_start < end_utc:
-            v = interval_value(ival, kind)
+            v = interval_value(ival, kind, unit)
             if v is not None:
                 total += float(v)
     return total
@@ -136,7 +137,8 @@ class LaggingSensor(_EstfeedEntity, SensorEntity):
         bucket = self._bucket
         tz = ZoneInfo(self.coordinator.hass.config.time_zone or "UTC")
         now = datetime.now(tz=UTC)
-        return round(sum_for_period(bucket, self._kind, self._period, now=now, tz=tz), 3)
+        unit = unit_for(self._meter.commodity_type)
+        return round(sum_for_period(bucket, self._kind, self._period, now=now, tz=tz, unit=unit), 3)
 
     @property
     def extra_state_attributes(self) -> dict[str, str]:

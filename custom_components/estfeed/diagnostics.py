@@ -68,6 +68,7 @@ async def async_get_config_entry_diagnostics(
                 for cstream in coordinator.cost_streams_for(m)
             ],
             "last_nps_error": coordinator.last_nps_error,
+            "last_gas_price_error": coordinator.last_gas_price_error,
             "nps_cache_size": coordinator.nps_cache_size,
             "nps_cache_recent": nps_cache_recent,
         },

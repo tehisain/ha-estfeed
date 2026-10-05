@@ -12,8 +12,8 @@ from homeassistant.components.recorder.statistics import async_add_external_stat
 from homeassistant.core import HomeAssistant
 
 from .api import AccountingInterval, interval_value
-from .const import DOMAIN, Kind
-from .pricing import compute_cost_rows, compute_cost_rows_from_hourly
+from .const import DOMAIN, UNIT_KWH, UNIT_M3, Kind
+from .pricing import compute_cost_rows, compute_cost_rows_from_hourly, compute_gas_cost_rows
 
 # HA 2026.11 will require `mean_type` in StatisticMetaData; older HA versions
 # don't expose StatisticMeanType. Detect at import time and only set the field
@@ -32,8 +32,8 @@ except ImportError:
 # and keeps statistics working past the cutover. Values match the converter
 # UNIT_CLASS attributes in homeassistant.util.unit_conversion.
 _UNIT_CLASS_BY_UNIT = {
-    "kWh": "energy",
-    "m³": "volume",
+    UNIT_KWH: "energy",
+    UNIT_M3: "volume",
 }
 
 # Public alias kept for backwards compatibility with callers / tests that import
@@ -62,10 +62,12 @@ def compute_statistic_rows(
     intervals: list[AccountingInterval],
     kind: Kind,
     prior_sum: float,
+    unit: str = UNIT_KWH,
 ) -> list[StatisticData]:
     """Build cumulative-sum statistic rows from raw intervals.
 
-    Skips intervals where the relevant value is None. Each row's ``start`` is
+    Values are taken in ``unit`` (the stream's unit of measurement). Skips
+    intervals where the relevant value is None. Each row's ``start`` is
     snapped down to the top of the hour because HA's recorder requires
     statistics timestamps to have minute=second=microsecond=0. If multiple
     sub-hourly intervals fall in the same hour bucket, their values are
@@ -75,7 +77,7 @@ def compute_statistic_rows(
     # Aggregate values into hourly buckets keyed by snapped start.
     hourly: dict[Any, float] = {}
     for ival in intervals:
-        value = interval_value(ival, kind)
+        value = interval_value(ival, kind, unit)
         if value is None:
             continue
         bucket = ival.period_start.replace(minute=0, second=0, microsecond=0)
@@ -113,7 +115,7 @@ async def async_write_meter_statistics(
     in as ``prior_sum`` for the next chunk to avoid a read-after-write hazard
     against HA's recorder (which may not flush statistics writes synchronously).
     """
-    rows = compute_statistic_rows(intervals, stream.kind, prior_sum=prior_sum)
+    rows = compute_statistic_rows(intervals, stream.kind, prior_sum=prior_sum, unit=stream.unit)
     if not rows:
         return prior_sum
     metadata: StatisticMetaData = {
@@ -210,4 +212,17 @@ async def async_write_cost_statistics_from_hourly(
     even when Estfeed revises recent intervals between fetches.
     """
     rows = compute_cost_rows_from_hourly(hourly_energy, prices, tariff, prior_sum=prior_sum)
+    return _publish_cost_rows(hass, stream, rows, prior_sum)
+
+
+async def async_write_gas_cost_statistics(
+    hass: HomeAssistant,
+    stream: CostStream,
+    hourly_kwh: dict[datetime, float],
+    prices: dict[datetime, float],
+    tariff: Callable[[float], float],
+    prior_sum: float,
+) -> float:
+    """Publish gas cost rows for every consumption hour (see compute_gas_cost_rows)."""
+    rows = compute_gas_cost_rows(hourly_kwh, prices, tariff, prior_sum=prior_sum)
     return _publish_cost_rows(hass, stream, rows, prior_sum)

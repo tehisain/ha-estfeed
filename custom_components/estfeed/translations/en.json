@@ -35,7 +35,10 @@
           "resolution": "Data resolution",
           "backfill_months": "Backfill window (months)",
           "vat_percent": "VAT percentage (%)",
-          "margin_eur_per_kwh": "Margin (EUR/kWh, can be negative)"
+          "margin_eur_per_kwh": "Margin (EUR/kWh, can be negative)",
+          "gas_price_mode": "Gas cost pricing",
+          "gas_price_eur_per_kwh": "Gas fixed price (EUR/kWh excl. VAT, fixed pricing)",
+          "gas_margin_eur_per_kwh": "Gas margin over exchange price (EUR/kWh excl. VAT, exchange pricing)"
         }
       }
     }
@@ -77,6 +80,15 @@
       "fields": {
         "reset_at": { "name": "Reset at", "description": "New anchor timestamp. The cumulative sensors will sum intervals from this moment forward." },
         "entry_id": { "name": "Config entry", "description": "Which Estfeed config entry to update." }
+      }
+    }
+  },
+  "selector": {
+    "gas_price_mode": {
+      "options": {
+        "off": "Off (no gas cost)",
+        "fixed": "Fixed price",
+        "exchange": "Exchange price (Elering gas index) + margin"
       }
     }
   }

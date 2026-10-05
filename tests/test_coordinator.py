@@ -126,7 +126,8 @@ async def test_coordinator_uses_latest_seen_as_start(hass, freezer):
 
     last_seen_ts = datetime(2026, 4, 28, 23, tzinfo=UTC).timestamp()
     fake_last_stats = {
-        "estfeed:home_consumption_089n": [{"end": last_seen_ts * 1000}],  # ms
+        # The recorder returns UNIX seconds (not the websocket API's ms).
+        "estfeed:home_consumption_089n": [{"end": last_seen_ts}],
     }
 
     with (
@@ -1567,6 +1568,251 @@ async def test_auth_error_starts_reauth_flow(hass):
     await hass.async_block_till_done()
     flows = hass.config_entries.flow.async_progress()
     assert any(flow["context"].get("source") == SOURCE_REAUTH for flow in flows)
+
+
+def _gas_hour(start: datetime, kwh: float | None, m3: float | None) -> AccountingInterval:
+    return AccountingInterval(
+        period_start=start,
+        consumption_kwh=kwh,
+        production_kwh=None if kwh is None else 0.0,
+        consumption_m3=m3,
+        production_m3=None if m3 is None else 0.0,
+    )
+
+
+def test_cumulative_since_reset_gas_sums_m3(hass):
+    coordinator = EstfeedCoordinator(hass=hass, client=MagicMock(), slug="home", options={})
+    coordinator.meters = [_gas_meter()]
+    eic = _gas_meter().eic
+    coordinator.baselines[(eic, Kind.CONSUMPTION)] = CumulativeBaseline(
+        reset_at=datetime.now(tz=UTC) - timedelta(days=2)
+    )
+    hour = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0) - timedelta(days=1)
+    coordinator._update_cache(
+        eic,
+        Kind.CONSUMPTION,
+        [_gas_hour(hour, 5.539, 0.524), _gas_hour(hour + timedelta(hours=1), 3.805, 0.36)],
+    )
+    assert coordinator.cumulative_since_reset(eic, Kind.CONSUMPTION) == 0.884
+
+
+@pytest.mark.asyncio
+async def test_gas_next_day_batch_lands_on_its_own_hours(hass):
+    """Estfeed publishes gas hours as a once-a-day batch; until then the hours
+    come back empty. The external statistic must place each hour of the batch
+    at its own timestamp once it arrives, not lump the day into one hour."""
+    day1 = datetime(2026, 10, 1, 4, tzinfo=UTC)  # 07:00 Tallinn, gas-day start
+    # Tick 1: first hour published, rest of the day still empty placeholders.
+    tick1 = [_gas_hour(day1, 1.227, 0.116)] + [
+        _gas_hour(day1 + timedelta(hours=h), None, None) for h in range(1, 10)
+    ]
+    # Tick 2 (next day): the batch for those hours has arrived.
+    tick2 = [
+        _gas_hour(day1 + timedelta(hours=1), 1.121, 0.106),
+        _gas_hour(day1 + timedelta(hours=2), 0.0, 0.0),
+        _gas_hour(day1 + timedelta(hours=12), 2.222, 0.21),
+    ]
+    client = MagicMock()
+    coord = EstfeedCoordinator(hass=hass, client=client, slug="home", options={})
+    coord.meters = [_gas_meter()]
+    written: dict[str, list] = {}
+
+    def _capture(_hass, metadata, rows):
+        written.setdefault(metadata["statistic_id"], []).extend(rows)
+
+    consumption_id = "estfeed:home_consumption_099g"
+    with (
+        patch(
+            "custom_components.estfeed.statistics.async_add_external_statistics",
+            side_effect=_capture,
+        ),
+        patch.object(coord, "_latest_seen_for_stream", new=AsyncMock(return_value=None)),
+        patch.object(coord, "_prior_sum_for_stream", new=AsyncMock(return_value=0.0)),
+    ):
+        client.get_metering_data = AsyncMock(
+            return_value=[MeterData(eic=_gas_meter().eic, intervals=tick1)]
+        )
+        await coord._fetch_meter_window(
+            _gas_meter(), day1, day1 + timedelta(hours=10), write_stats=True, force_start=False
+        )
+    rows1 = written.pop(consumption_id)
+    assert [(r["start"], r["sum"]) for r in rows1] == [(day1, 0.116)]
+
+    # Resume where the recorder's last row ends, chaining its cumulative sum.
+    with (
+        patch(
+            "custom_components.estfeed.statistics.async_add_external_statistics",
+            side_effect=_capture,
+        ),
+        patch.object(
+            coord,
+            "_latest_seen_for_stream",
+            new=AsyncMock(return_value=day1 + timedelta(hours=1)),
+        ),
+        patch.object(coord, "_prior_sum_for_stream", new=AsyncMock(return_value=0.116)),
+    ):
+        client.get_metering_data = AsyncMock(
+            return_value=[MeterData(eic=_gas_meter().eic, intervals=tick2)]
+        )
+        await coord._fetch_meter_window(
+            _gas_meter(),
+            day1 - timedelta(days=30),
+            day1 + timedelta(days=1),
+            write_stats=True,
+            force_start=False,
+        )
+    rows2 = written[consumption_id]
+    assert [r["start"] for r in rows2] == [
+        day1 + timedelta(hours=1),
+        day1 + timedelta(hours=2),
+        day1 + timedelta(hours=12),
+    ]
+    assert [r["sum"] for r in rows2] == pytest.approx([0.222, 0.222, 0.432])
+
+
+# ---- Gas cost statistic (flat price) ----
+
+
+def test_cost_streams_for_gas_with_price_returns_gas_cost_stream(hass):
+    coord = EstfeedCoordinator(
+        hass=hass, client=MagicMock(), slug="home", options={"gas_price_eur_per_kwh": 0.05}
+    )
+    coord.meters = [_gas_meter()]
+    streams = coord.cost_streams_for(_gas_meter())
+    assert [(s.statistic_id, s.unit, s.kind) for s in streams] == [
+        ("estfeed:home_gas_cost_099g", "EUR", Kind.CONSUMPTION)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_meter_window_writes_gas_cost_from_kwh_without_nps(hass):
+    """Gas cost = hourly kWh * flat price * (1 + VAT); no NPS client needed,
+    and the margin (an electricity option) is not applied."""
+    hour = datetime(2026, 10, 1, 4, tzinfo=UTC)
+    client = MagicMock()
+    client.get_metering_data = AsyncMock(
+        return_value=[
+            MeterData(
+                eic=_gas_meter().eic,
+                intervals=[
+                    _gas_hour(hour, 5.539, 0.524),
+                    _gas_hour(hour + timedelta(hours=1), 0.0, 0.0),
+                    _gas_hour(hour + timedelta(hours=2), None, None),
+                ],
+            )
+        ]
+    )
+    coord = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={
+            "gas_price_eur_per_kwh": 0.1,
+            CONF_VAT_PERCENT: 22.0,
+            CONF_MARGIN_EUR_PER_KWH: 0.5,
+        },
+    )
+    coord.meters = [_gas_meter()]
+    written: dict[str, list] = {}
+
+    def _capture(_hass, metadata, rows):
+        written.setdefault(metadata["statistic_id"], []).extend(rows)
+
+    with (
+        patch(
+            "custom_components.estfeed.statistics.async_add_external_statistics",
+            side_effect=_capture,
+        ),
+        patch.object(coord, "_latest_seen_for_stream", new=AsyncMock(return_value=None)),
+        patch.object(coord, "_prior_sum_for_stream", new=AsyncMock(return_value=0.0)),
+        patch.object(coord, "_sum_before_window", new=AsyncMock(return_value=1.0)),
+    ):
+        await coord._fetch_meter_window(
+            _gas_meter(), hour, hour + timedelta(hours=3), write_stats=True, force_start=False
+        )
+    cost = written["estfeed:home_gas_cost_099g"]
+    # 5.539 kWh * 0.1 €/kWh * 1.22 = 0.6758 €, chained onto the prior sum 1.0.
+    assert [(r["start"], r["sum"]) for r in cost] == [
+        (hour, 1.6758),
+        (hour + timedelta(hours=1), 1.6758),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_async_rebuild_cost_rebuilds_gas_from_api_kwh(hass):
+    """Gas rebuild re-fetches kWh from Estfeed (the stored series is m³) and
+    chains onto the sum before the window; it runs without an NPS client."""
+    hour = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0) - timedelta(days=2)
+    client = MagicMock()
+    client.get_metering_data = AsyncMock(
+        return_value=[
+            MeterData(
+                eic=_gas_meter().eic,
+                intervals=[
+                    _gas_hour(hour, 10.0, 0.946),
+                    _gas_hour(hour + timedelta(hours=1), 2.5, 0.237),
+                ],
+            )
+        ]
+    )
+    coord = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={
+            "gas_price_eur_per_kwh": 0.05,
+            CONF_VAT_PERCENT: 24.0,
+            CONF_BACKFILL_MONTHS: 1,
+        },
+    )
+    coord.meters = [_gas_meter()]
+    written: dict[str, list] = {}
+
+    def _capture(_hass, metadata, rows):
+        written.setdefault(metadata["statistic_id"], []).extend(rows)
+
+    with (
+        patch(
+            "custom_components.estfeed.statistics.async_add_external_statistics",
+            side_effect=_capture,
+        ),
+        patch.object(coord, "_sum_before_window", new=AsyncMock(return_value=0.0)),
+    ):
+        await coord.async_rebuild_cost()
+    cost = written["estfeed:home_gas_cost_099g"]
+    # 10 kWh * 0.05 * 1.24 = 0.62; + 2.5 kWh * 0.05 * 1.24 = 0.155.
+    assert [(r["start"], r["sum"]) for r in cost] == [
+        (hour, 0.62),
+        (hour + timedelta(hours=1), 0.775),
+    ]
+    assert client.get_metering_data.call_args.args[2] == Resolution.HOUR
+
+
+@pytest.mark.asyncio
+async def test_async_rebuild_cost_gas_aborts_on_meter_error(hass):
+    """A failed chunk must not publish a partially-priced gas cost series."""
+    from custom_components.estfeed.api import MeterError
+
+    client = MagicMock()
+    client.get_metering_data = AsyncMock(
+        return_value=[
+            MeterData(
+                eic=_gas_meter().eic,
+                intervals=[],
+                error=MeterError(id="1", message="boom", code="x", trace_id="t", args=[]),
+            )
+        ]
+    )
+    coord = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={"gas_price_eur_per_kwh": 0.05, CONF_BACKFILL_MONTHS: 1},
+    )
+    coord.meters = [_gas_meter()]
+    with patch("custom_components.estfeed.statistics.async_add_external_statistics") as mock_add:
+        await coord.async_rebuild_cost()
+    mock_add.assert_not_called()
 
 
 async def test_quarter_hour_updates_preserve_all_quarters_across_ticks(hass):

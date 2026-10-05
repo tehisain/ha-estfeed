@@ -23,6 +23,17 @@ CONF_VAT_PERCENT: Final = "vat_percent"
 CONF_MARGIN_EUR_PER_KWH: Final = "margin_eur_per_kwh"
 DEFAULT_VAT_PERCENT: Final = 22.0
 DEFAULT_MARGIN_EUR_PER_KWH: Final = 0.0
+# Gas cost pricing: off, a fixed price, or the Elering gas exchange index.
+CONF_GAS_PRICE_MODE: Final = "gas_price_mode"
+# Fixed gas price (EUR/kWh, excl. VAT), used in fixed mode.
+CONF_GAS_PRICE_EUR_PER_KWH: Final = "gas_price_eur_per_kwh"
+DEFAULT_GAS_PRICE_EUR_PER_KWH: Final = 0.0
+# Seller margin over the exchange index (EUR/kWh, excl. VAT), used in exchange mode.
+CONF_GAS_MARGIN_EUR_PER_KWH: Final = "gas_margin_eur_per_kwh"
+DEFAULT_GAS_MARGIN_EUR_PER_KWH: Final = 0.0
+# Trailing days of gas cost every tick re-prices: the exchange index for a
+# gas day is published about a day after Estfeed delivers its usage.
+GAS_REPRICE_DAYS: Final = 7
 
 UPDATE_INTERVAL: Final = timedelta(hours=1)
 ROLLING_CACHE_DAYS: Final = 62
@@ -57,8 +68,25 @@ class Kind(StrEnum):
     PRODUCTION = "production"
 
 
+class GasPriceMode(StrEnum):
+    """How the gas cost statistic is priced."""
+
+    OFF = "off"
+    FIXED = "fixed"
+    EXCHANGE = "exchange"
+
+
 class CommodityType(StrEnum):
     """Estfeed commodity types."""
 
     ELECTRICITY = "ELECTRICITY"
     NATURAL_GAS = "NATURAL_GAS"
+
+
+UNIT_KWH: Final = "kWh"
+UNIT_M3: Final = "m³"
+
+
+def unit_for(commodity: CommodityType) -> str:
+    """Unit published for a commodity: kWh for electricity, m³ for gas."""
+    return UNIT_KWH if commodity == CommodityType.ELECTRICITY else UNIT_M3

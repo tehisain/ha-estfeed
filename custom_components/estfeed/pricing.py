@@ -86,3 +86,29 @@ def compute_cost_rows_from_hourly(
         running = round(running + cost, 4)
         rows.append({"start": start, "state": running, "sum": running})
     return rows
+
+
+def compute_gas_cost_rows(
+    hourly_kwh: dict[datetime, float],
+    prices: dict[datetime, float],
+    tariff: Callable[[float], float],
+    prior_sum: float,
+) -> list[StatisticData]:
+    """Build cumulative-sum gas cost rows, one per consumption hour.
+
+    Unlike ``compute_cost_rows_from_hourly``, hours without a price still get
+    a row, carrying the running sum forward at zero cost. The gas exchange
+    index is published a day after usage arrives, and a missing row would
+    leave any older row for that hour (e.g. from a previous price setting)
+    in place with an inconsistent sum. The caller re-prices a trailing window
+    every tick, so placeholders are replaced once the price is published.
+    Rounds to 4 decimals (€0.0001).
+    """
+    rows: list[StatisticData] = []
+    running = prior_sum
+    for start in sorted(hourly_kwh):
+        price = prices.get(start)
+        if price is not None:
+            running = round(running + round(hourly_kwh[start] * tariff(price), 4), 4)
+        rows.append({"start": start, "state": running, "sum": running})
+    return rows

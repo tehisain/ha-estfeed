@@ -35,7 +35,10 @@
           "resolution": "Andmete täpsus",
           "backfill_months": "Ajalooliste andmete aken (kuud)",
           "vat_percent": "Käibemaks (%)",
-          "margin_eur_per_kwh": "Marginaal (EUR/kWh, võib olla negatiivne)"
+          "margin_eur_per_kwh": "Marginaal (EUR/kWh, võib olla negatiivne)",
+          "gas_price_mode": "Gaasi kulu arvestus",
+          "gas_price_eur_per_kwh": "Gaasi fikseeritud hind (EUR/kWh ilma käibemaksuta, fikseeritud hinnaga)",
+          "gas_margin_eur_per_kwh": "Gaasi marginaal börsihinnale (EUR/kWh ilma käibemaksuta, börsihinnaga)"
         }
       }
     }
@@ -77,6 +80,15 @@
       "fields": {
         "reset_at": { "name": "Lähtestus", "description": "Uus algushetk. Kumulatiivsed sensorid summeerivad intervallid alates sellest hetkest." },
         "entry_id": { "name": "Konfig kirje", "description": "Millise Estfeed kirje algushetk uuendada." }
+      }
+    }
+  },
+  "selector": {
+    "gas_price_mode": {
+      "options": {
+        "off": "Väljas (gaasi kulu ei arvestata)",
+        "fixed": "Fikseeritud hind",
+        "exchange": "Börsihind (Eleringi gaasiindeks) + marginaal"
       }
     }
   }

@@ -14,6 +14,11 @@ from homeassistant.config_entries import (
 )
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
 from .api import EstfeedAuthError, EstfeedClient, EstfeedError
 from .const import (
@@ -21,16 +26,22 @@ from .const import (
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
     CONF_FRIENDLY_NAME,
+    CONF_GAS_MARGIN_EUR_PER_KWH,
+    CONF_GAS_PRICE_EUR_PER_KWH,
+    CONF_GAS_PRICE_MODE,
     CONF_MARGIN_EUR_PER_KWH,
     CONF_RESOLUTION,
     CONF_VAT_PERCENT,
     DEFAULT_BACKFILL_MONTHS,
     DEFAULT_FRIENDLY_NAME,
+    DEFAULT_GAS_MARGIN_EUR_PER_KWH,
+    DEFAULT_GAS_PRICE_EUR_PER_KWH,
     DEFAULT_MARGIN_EUR_PER_KWH,
     DEFAULT_VAT_PERCENT,
     DOMAIN,
     MAX_BACKFILL_MONTHS,
     MIN_BACKFILL_MONTHS,
+    GasPriceMode,
     Resolution,
 )
 from .utils import slugify
@@ -146,6 +157,11 @@ class EstfeedOptionsFlow(OptionsFlow):
             return self.async_create_entry(title="", data=user_input)
 
         current = self.config_entry.options
+        gas_price = current.get(CONF_GAS_PRICE_EUR_PER_KWH, DEFAULT_GAS_PRICE_EUR_PER_KWH)
+        # Entries saved before the mode option existed had only a fixed price.
+        gas_mode = current.get(
+            CONF_GAS_PRICE_MODE, GasPriceMode.FIXED if gas_price > 0 else GasPriceMode.OFF
+        )
         schema = vol.Schema(
             {
                 vol.Required(
@@ -163,6 +179,22 @@ class EstfeedOptionsFlow(OptionsFlow):
                 vol.Required(
                     CONF_MARGIN_EUR_PER_KWH,
                     default=current.get(CONF_MARGIN_EUR_PER_KWH, DEFAULT_MARGIN_EUR_PER_KWH),
+                ): vol.All(vol.Coerce(float), vol.Range(min=-1.0, max=1.0)),
+                vol.Required(CONF_GAS_PRICE_MODE, default=str(gas_mode)): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[mode.value for mode in GasPriceMode],
+                        translation_key=CONF_GAS_PRICE_MODE,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(CONF_GAS_PRICE_EUR_PER_KWH, default=gas_price): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=10.0)
+                ),
+                vol.Required(
+                    CONF_GAS_MARGIN_EUR_PER_KWH,
+                    default=current.get(
+                        CONF_GAS_MARGIN_EUR_PER_KWH, DEFAULT_GAS_MARGIN_EUR_PER_KWH
+                    ),
                 ): vol.All(vol.Coerce(float), vol.Range(min=-1.0, max=1.0)),
             }
         )

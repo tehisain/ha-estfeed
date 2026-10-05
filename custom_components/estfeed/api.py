@@ -22,6 +22,8 @@ from .const import (
     RECENT_REQUESTS_BUFFER_SIZE,
     REQUEST_TIMEOUT_SECONDS,
     TOKEN_REFRESH_MARGIN_SECONDS,
+    UNIT_KWH,
+    UNIT_M3,
     CommodityType,
     Kind,
     Resolution,
@@ -90,19 +92,17 @@ class AccountingInterval:
         )
 
 
-def interval_value(interval: AccountingInterval, kind: Kind) -> float | None:
-    """Return the kWh/m³ value for a kind, falling back across units.
+def interval_value(interval: AccountingInterval, kind: Kind, unit: str = UNIT_KWH) -> float | None:
+    """Return the value for a kind in the requested unit (kWh or m³).
 
     Single canonical implementation shared by the coordinator, statistics
-    writer, pricing helpers, and sensors.
+    writer, pricing helpers, and sensors. There is deliberately no fallback
+    across units: gas intervals carry both kWh and m³ (1 m³ ≈ 10.6 kWh), so
+    mixing them would silently scale a series by the calorific value.
     """
-    if kind == Kind.CONSUMPTION:
-        if interval.consumption_kwh is not None:
-            return interval.consumption_kwh
-        return interval.consumption_m3
-    if interval.production_kwh is not None:
-        return interval.production_kwh
-    return interval.production_m3
+    if unit == UNIT_M3:
+        return interval.consumption_m3 if kind == Kind.CONSUMPTION else interval.production_m3
+    return interval.consumption_kwh if kind == Kind.CONSUMPTION else interval.production_kwh
 
 
 @dataclass(frozen=True, slots=True)
