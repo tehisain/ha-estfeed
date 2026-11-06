@@ -126,7 +126,9 @@ async def test_coordinator_uses_latest_seen_as_start(hass, freezer):
 
     last_seen_ts = datetime(2026, 4, 28, 23, tzinfo=UTC).timestamp()
     fake_last_stats = {
-        "estfeed:home_consumption_089n": [{"end": last_seen_ts * 1000}],  # ms
+        "estfeed:home_consumption_089n": [
+            {"end": last_seen_ts}
+        ],  # seconds, as the recorder returns
     }
 
     with (
@@ -1629,3 +1631,65 @@ async def test_quarter_hour_updates_preserve_all_quarters_across_ticks(hass):
             force_start=False,
         )
     assert [row["sum"] for row in published[consumption_id]] == [4.0, 8.0, 12.0]
+
+
+@pytest.mark.asyncio
+async def test_latest_seen_reads_real_recorder_timestamps(hass):
+    """_latest_seen_for_stream must match the recorder's real return format.
+
+    Regression: ``end`` was read as milliseconds, but the recorder's Python API
+    returns seconds, so "last seen" landed in 1970 and every hourly tick
+    re-wrote the whole 30-day window with a jump at its start.
+    """
+    from homeassistant.components import recorder
+    from homeassistant.helpers import recorder as recorder_helper
+    from homeassistant.setup import async_setup_component
+    from pytest_homeassistant_custom_component.components.recorder.common import (
+        async_wait_recording_done,
+    )
+
+    with patch("homeassistant.components.recorder.ALLOW_IN_MEMORY_DB", True):
+        recorder_helper.async_initialize_recorder(hass)
+        assert await async_setup_component(
+            hass, recorder.DOMAIN, {recorder.DOMAIN: {"db_url": "sqlite://", "commit_interval": 0}}
+        )
+        await hass.async_block_till_done()
+
+    from homeassistant.components.recorder.statistics import async_add_external_statistics
+
+    from custom_components.estfeed.statistics import StatisticStream
+
+    stream = StatisticStream(
+        statistic_id="estfeed:home_consumption_001a",
+        name="Home consumption 001A",
+        unit="kWh",
+        kind=Kind.CONSUMPTION,
+    )
+    # Minimal metadata accepted by every supported HA version.
+    metadata = {
+        "source": "estfeed",
+        "statistic_id": stream.statistic_id,
+        "name": stream.name,
+        "unit_of_measurement": stream.unit,
+        "has_sum": True,
+        "has_mean": False,
+    }
+    try:
+        from homeassistant.components.recorder.models import StatisticMeanType
+
+        metadata["mean_type"] = StatisticMeanType.NONE
+    except ImportError:
+        pass
+    h10 = datetime(2026, 5, 21, 10, tzinfo=UTC)
+    async_add_external_statistics(
+        hass,
+        metadata,
+        [
+            {"start": h10, "state": 1.0, "sum": 1.0},
+            {"start": h10 + timedelta(hours=1), "state": 2.0, "sum": 2.0},
+        ],
+    )
+    await async_wait_recording_done(hass)
+
+    coord = EstfeedCoordinator(hass=hass, client=MagicMock(), slug="home", options={})
+    assert await coord._latest_seen_for_stream(stream) == h10 + timedelta(hours=2)
