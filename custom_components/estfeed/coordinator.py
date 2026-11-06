@@ -594,10 +594,11 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         rows = last_stats.get(stream.statistic_id)
         if not rows:
             return None
-        end_ms = rows[0].get("end")
-        if end_ms is None:
+        # Seconds here; only the websocket API returns milliseconds.
+        end_ts = rows[0].get("end")
+        if end_ts is None:
             return None
-        return datetime.fromtimestamp(end_ms / 1000.0, tz=UTC)
+        return datetime.fromtimestamp(float(end_ts), tz=UTC)
 
     async def _prior_sum_for_stream(self, stream: StatisticStream) -> float:
         last_stats = await get_instance(self.hass).async_add_executor_job(
