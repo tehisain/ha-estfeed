@@ -594,11 +594,7 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         rows = last_stats.get(stream.statistic_id)
         if not rows:
             return None
-        # The recorder's Python API returns ``start``/``end`` as Unix timestamps
-        # in SECONDS (only the websocket API converts them to milliseconds).
-        # Reading them as milliseconds puts "last seen" in January 1970, so
-        # every tick re-wrote the whole 30-day window chained onto the latest
-        # sum, leaving a ~30-days-of-consumption jump at the window start.
+        # Seconds here; only the websocket API returns milliseconds.
         end_ts = rows[0].get("end")
         if end_ts is None:
             return None
